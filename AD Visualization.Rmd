@@ -1,0 +1,129 @@
+---
+title: "AD Visualization"
+author: "Alexander Bergendorf"
+date: "2023-09-28"
+output: html_document
+---
+
+# Library Import
+```{r}
+library(Seurat)
+library(mixOmics)
+library(h2o)
+library(tidyverse)
+library(orthogene)
+library(dittoSeq)
+library(openxlsx)
+library(readxl)
+#home_dir <- "C:/Users/aberg/OneDrive/Desktop/Research_Brubaker/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+home_dir <- "C:/Users/Alexander/OneDrive/Desktop/Research_Brubaker/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+```
+
+# Data Import
+```{r}
+human <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/human_adwt_labeled_ortholog.RData"))
+
+mouse <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_adwt_labeled.RData"))
+```
+
+```{r}
+table(mouse@meta.data$summary, mouse@meta.data$orig.ident)
+```
+
+```{r}
+table(human@meta)
+```
+
+
+# 1B
+```{r}
+cell_counts <- read.csv(file = paste0(home_dir, "/Manuscript and Figures/Figure 1/cell_counts.csv"))
+cell_counts$sample_species <- paste0(cell_counts$Sample, "_", cell_counts$Species)
+
+cell_counts
+p <- ggplot(data=cell_counts, aes(x=Cell_Type, y=Count, fill=sample_species)) +
+geom_bar(stat="identity", color="black", position=position_dodge())+
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+p
+ggsave(filename= paste0(home_dir, "/Manuscript and Figures/Figure 1/1B.jpg"), width = 9, height = 7)
+#cairo_ps(filename= paste0(home_dir, "/Manuscript and Figures/Figure 1/1F.jpg"), width = 9, height = 7) # name the file as an EPS
+p #variable of the figure that is defined/saved, can be used any name
+#dev.off()
+```
+
+# Fgsea visualization
+## sPCA
+```{r}
+hallmark_gsea_results <- read.xlsx(paste0(home_dir, "/fgsea_spca_results_hallmark.xlsx"), sheet = 5)
+```
+
+
+```{r}
+hallmark_gsea_results  <- hallmark_gsea_results [with(hallmark_gsea_results , !((padj >= 0.25))), ]
+hallmark_gsea_results
+
+# Remove the Data Below FDR of 0.01 (0.01 is considered the level of significance)
+Proc_T2D_PC2_HALLMARK <- hallmark_gsea_results %>% mutate(sign = NES <= 0)
+Proc_T2D_PC2_HALLMARK
+# Adjust the positions on the bar chart to display bars from lowest NES value to largest value
+arranged_position <- Proc_T2D_PC2_HALLMARK %>% arrange(desc(NES))
+arranged_position
+# Pull out the positions for the enrichment plot
+positions <- arranged_position$pathway
+# Creating the horizontal bar plots
+p<-ggplot(Proc_T2D_PC2_HALLMARK) +
+  geom_col(aes(x = NES, y = pathway, fill = sign), colour = "black", width = 0.8) +
+  ylab(NULL) + xlab("Normalized Enrichment Score") + theme_minimal() +
+  theme(legend.position = "right", text = element_text(color = "black", size = 2),
+        axis.text = element_text(color = "black", size = 10)) + 
+  theme_classic() +
+  geom_vline(xintercept = 0, color = "black", linetype = "solid", linewidth = 1.5) +
+  xlim(c(-4.5, 4.5)) + 
+  scale_y_discrete(limits = positions) +
+  scale_fill_manual(values = c("royalblue", "red"),
+                    name = "Enrichment",  # Legend title
+                    labels = c("C", "AD")) +  # Custom labels
+  guides(fill = guide_legend(title.position = "top"))
+cairo_ps(filename= paste0(home_dir, "/Manuscript and Figures/fgsea_spc5.eps"), width = 7, height = 7) # name the file as an EPS
+p #variable of the figure that is defined/saved, can be used any name
+dev.off()
+```
+
+## PCA
+```{r}
+hallmark_gsea_results <- read.xlsx(paste0(home_dir, "/fgsea_pca_results_hallmark.xlsx"), sheet = 3)
+```
+
+```{r}
+hallmark_gsea_results  <- hallmark_gsea_results [with(hallmark_gsea_results , !((padj >= 0.25))), ]
+# Remove the Data Below FDR of 0.01 (0.01 is considered the level of significance)
+Proc_T2D_PC2_HALLMARK <- hallmark_gsea_results %>% mutate(sign = NES <= 0)
+# Adjust the positions on the bar chart to display bars from lowest NES value to largest value
+arranged_position <- arrange(Proc_T2D_PC2_HALLMARK, desc(NES))
+# Pull out the positions for the enrichment plot
+positions <- arranged_position$pathway
+# Creating the horizontal bar plots
+p <- ggplot(Proc_T2D_PC2_HALLMARK) +
+  geom_col(aes(x = NES, y = pathway, fill = sign), colour = "black", width = 0.8) +
+  ylab(NULL) + xlab("Normalized Enrichment Score") + theme_minimal() +
+  theme(legend.position = "right", text = element_text(color = "black", size = 2),
+        axis.text = element_text(color = "black", size = 10)) + 
+  theme_classic() +
+  geom_vline(xintercept = 0, color = "black", linetype = "solid", linewidth = 1.5) +
+  xlim(c(-4.5, 4.5)) + 
+  scale_y_discrete(limits = positions) +
+  scale_fill_manual(values = c("royalblue", "red"),
+                    name = "Enrichment",  # Legend title
+                    labels = c("C", "AD")) +  # Custom labels
+  guides(fill = guide_legend(title.position = "top"))
+cairo_ps(filename= paste0(home_dir, "/Manuscript and Figures/Figure 4/4E.eps"), width = 7, height = 7) # name the file as an EPS
+p #variable of the figure that is defined/saved, can be used any name
+dev.off()
+```
+
+# Session Info
+```{r}
+sessionInfo()
+```
+

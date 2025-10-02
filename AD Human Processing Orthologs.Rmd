@@ -1,0 +1,213 @@
+---
+title: "AD Human Processing"
+author: "Alexander Bergendorf"
+date: "2023-06-19"
+output: html_document
+---
+
+# Library Import
+```{r}
+library(Seurat) 
+library(tidyverse) 
+library(patchwork) 
+library(dittoSeq) 
+library(stringr)
+library(gprofiler2)
+library(harmony)
+library(patchwork)
+library(cowplot)
+library(openxlsx)
+library(MAST)
+
+home_dir <- "C:/Users/aberg/OneDrive/Desktop/Research_Brubaker/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+```
+
+
+# Finding Cluster Identifications
+```{r}
+combined <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/human_adc_final_ortholog.RData"))
+```
+
+```{r}
+variance <- (combined@reductions$pca@stdev)^2
+variance <- variance / sum(variance)
+variance
+```
+
+
+```{r}
+variance <- (combined@reductions$harmony@stdev)^2
+variance <- variance / sum(variance)
+variance
+```
+
+
+```{r}
+# Calculate markers with sample as latent variable
+markers <- FindAllMarkers(combined, assay = "RNA", only.pos = TRUE, logfc.threshold = 0.5, test.use = "MAST", latent.vars = "orig.ident") 
+
+clust_counts <- table(combined@meta.data[,"seurat_clusters"]) 
+
+clust_markers_list <- list() 
+
+for(i in unique(markers$cluster)){ 
+
+clustname <- paste0('cluster', i, '_N', clust_counts[i]) 
+
+clust_markers_list[[clustname]] <- subset(markers, markers$cluster == i) 
+
+rownames(clust_markers_list[[clustname]]) <- clust_markers_list[[clustname]]$gene 
+
+} 
+
+write.xlsx(clust_markers_list, file = paste0(home_dir, "/all_cell_markers_human_ortholog.xlsx"))
+```
+
+
+
+```{r}
+# Visualization of some markers
+marker_list <- c("GAD1", "NRGN")
+
+Idents(combined) <- combined@meta.data$seurat_clusters
+
+for(i in marker_list){
+  print(i)
+  
+  print(dittoDimPlot(combined, var = i, assay = "RNA"))
+  print(VlnPlot(combined, i, assay = "RNA"))
+}
+
+```
+
+
+Source used for cluster identification
+
+https://www.researchgate.net/publication/333831987_Author_Correction_Single-cell_transcriptomic_analysis_of_Alzheimer's_disease
+
+
+
+# Assign Idents
+```{r}
+combined <- subset(combined, subset = seurat_clusters == 21, invert = TRUE)
+
+# Summary of identification for human data
+Idents(combined) <- combined@meta.data$seurat_clusters 
+
+new.cluster.ids <- c("Astrocyte", "Oligodendrocyte", "Microglia", "Neuron", "Oligodendrocyte",
+                     "Neuron", "Oligodendrocyte Precursor", "Neuron", "Astrocyte", "Neuron",
+                     "Neuron", "Neuron", "Neuron", "Endothelial", "Neuron",
+                     "Neuron", "Neuron", "Endothelial", "Neuron", "Neuron",
+                     "Neuron")
+
+names(new.cluster.ids) <- levels(combined) 
+
+combined <- RenameIdents(combined, new.cluster.ids) 
+
+combined@meta.data$summary <- Idents(combined) 
+```
+
+```{r}
+# Detailed identifications for human data
+Idents(combined) <- combined@meta.data$seurat_clusters 
+
+new.cluster.ids <- c("Astrocyte_0", "Oligodendrocyte_1", "Microglia_2", "Neuron_3", "Oligodendrocyte Precursor_4",
+                     "Neuron_5", "Oligodendrocyte_6", "Neuron_7", "Astrocyte_8", "Neuron_9",
+                     "Neuron_10", "Neuron_11", "Neuron_12", "Endothelial_13", "Neuron_14",
+                     "Neuron_15", "Neuron_16", "Endothelial_17", "Neuron_18", "Neuron_19",
+                     "Neuron_20")
+
+names(new.cluster.ids) <- levels(combined) 
+
+combined <- RenameIdents(combined, new.cluster.ids) 
+
+combined@meta.data$detail <- Idents(combined) 
+```
+
+```{r}
+dittoDimPlot(combined, "seurat_clusters", do.label = TRUE, legend.show = FALSE, labels.size = 3) 
+dittoDimPlot(combined, "summary")
+dittoDimPlot(combined, "detail")
+```
+
+```{r}
+# Assigning correct orig.ident classifications to sample
+combined_A1 <- subset(combined, subset = orig.ident == "A1")
+combined_A1@meta.data$orig.ident <- "AD_1"
+Idents(combined, cells = Cells(combined_A1)) <- combined_A1@meta.data$orig.ident
+
+combined_A1 <- subset(combined, subset = orig.ident == "A2")
+combined_A1@meta.data$orig.ident <- "C_1"
+Idents(combined, cells = Cells(combined_A1)) <- combined_A1@meta.data$orig.ident
+
+combined_A1 <- subset(combined, subset = orig.ident == "A3")
+combined_A1@meta.data$orig.ident <- "AD_2"
+Idents(combined, cells = Cells(combined_A1)) <- combined_A1@meta.data$orig.ident
+
+combined_A1 <- subset(combined, subset = orig.ident == "A4")
+combined_A1@meta.data$orig.ident <- "C_2"
+Idents(combined, cells = Cells(combined_A1)) <- combined_A1@meta.data$orig.ident
+
+```
+
+```{r}
+saveRDS(combined, file = paste0(home_dir, "/AD_human_objects_ortholog/human_adwt_labeled_ortholog.RData"))
+#combined <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/human_adwt_labeled_ortholog.RData"))
+```
+
+
+# Visualization
+## 1B
+```{r}
+# UMAP of Human cells
+Idents(combined) <- combined@meta.data$summary
+levels(combined) <- c("Astrocyte", "Endothelial", "Microglia", 
+                      "Neuron", "Oligodendrocyte", "Oligodendrocyte Precursor")
+
+p1 <- dittoDimPlot(combined, Idents(combined))
+p1
+cairo_ps(filename= paste0(home_dir, "/Manuscript and Figures/Figure 1/1B.eps"), width = 9, height = 7) # name the file as an EPS
+p1 #variable of the figure that is defined/saved, can be used any name
+dev.off()
+```
+
+```{r}
+dittoDimPlot(combined, "ANLN")
+```
+
+
+
+## 1C
+```{r}
+levels(combined) <- c("Microglia", "Endothelial", "Astrocyte", 
+                      "Oligodendrocyte Precursor", "Oligodendrocyte", "Neuron")
+markers <- c("GAD1", "NRGN",
+             "ANLN", 
+             "VCAN", 
+             "CABLES1", "AQP4", 
+             "VWF", "FLT1",
+             "CSF1R")
+# Dotplot of common human markers
+markers <- rev(markers)
+p2 <- DotPlot(combined, features = markers, assay = "RNA") + 
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) + scale_y_discrete(limits = rev)
+p2
+cairo_ps(filename= paste0(home_dir, "/Manuscript and Figures/Figure 1/1C_dotplot.eps"), width = 9, height = 7) # name the file as an EPS
+p2 #variable of the figure that is defined/saved, can be used any name
+dev.off()
+```
+
+
+
+## Cell Counts
+```{r}
+# Cell counts by genotype
+cell_count_table <- table(combined@meta.data$summary, combined@meta.data$Genotype)
+write.csv(cell_count_table, file = paste0(home_dir, "/Manuscript and Figures/Figure 1/human_counts.csv"))
+```
+
+
+```{r}
+sessionInfo()
+```
+

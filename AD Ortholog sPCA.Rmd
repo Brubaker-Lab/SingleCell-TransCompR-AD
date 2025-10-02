@@ -1,0 +1,433 @@
+---
+title: "AD Ortholog sPCA"
+author: "Alexander Bergendorf"
+date: "2023-08-07"
+output: html_document
+---
+
+
+# Library Import
+```{r}
+library(Seurat)
+library(mixOmics)
+library(tidyverse)
+library(orthogene)
+library(dittoSeq)
+library(elasticnet)
+library(MASS)
+library(pROC)
+#home_dir <- "C:/Users/aberg/OneDrive/Desktop/Research_Brubaker/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+home_dir <- "C:/Users/Alexander/OneDrive/Desktop/Research_Brubaker/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+```
+
+# sPCA exploration
+## Loading Mouse Data
+```{r}
+combined <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_adwt_labeled.RData"))
+combined <- subset(combined, subset = summary == "Microglia")
+```
+
+
+
+
+```{r}
+# Filtering mouse object based on good barcodes found
+good_microglia <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/good_microglia_barcodes.RData"))
+combined <- subset(combined, cells = good_microglia)
+combined
+```
+
+
+```{r}
+# Normalized and scale data, do not center - spca() from mixomics will center
+DefaultAssay(combined) <- "RNA"
+combined <- NormalizeData(combined)
+combined <- FindVariableFeatures(combined, selection.method = "vst", nfeatures = 3250)
+all.genes <- rownames(combined)
+combined <- ScaleData(combined, features = all.genes, do.center = FALSE)
+```
+
+
+
+## Run sPCA
+```{r}
+# Transpose mouse matrix and run spca, get 50 principal components
+mouse_mat <- as.matrix(t(combined@assays$RNA@scale.data[VariableFeatures(object = combined),]))
+mouse_embeddings <- mixOmics::spca(mouse_mat, ncomp = 50, scale = FALSE, center = TRUE)
+plot(mouse_embeddings)
+```
+
+
+```{r}
+# Save spca object output
+saveRDS(mouse_embeddings, file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_embeddings.RData"))
+#mouse_embeddings <-readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_embeddings.RData"))
+```
+
+```{r}
+# Variance explained for spca pulled from spca object
+variance_explained <- mouse_embeddings$prop_expl_var$X
+variance_explained <- variance_explained /sum(variance_explained)
+write.csv(variance_explained, paste0(home_dir, "/spca_variances_mouse.csv"))
+```
+
+
+```{r}
+variance <- read.csv(paste0(home_dir, "/spca_variances_mouse.csv"))
+colnames(variance) <- c("PC", "sdev")
+variance$cum_var <- cumsum(variance$sdev)
+variance$observation <- 1:nrow(variance) 
+variance
+```
+
+```{r}
+svg('C:/Users/aberg/OneDrive/Desktop/Mouse_variance_explained_spca.svg', width = 5, height = 4)
+ggplot(data = variance, aes(x = observation, y = cum_var, group = 1)) +
+  geom_line(color = "black") +  # Changed line color to blue
+  geom_point(color = "black") +  # Added points with the same color
+  geom_hline(yintercept = 0.80, linetype = "dashed", color = "red") +  # Added red dashed line at 0.80 cum_var
+  geom_point(data = subset(variance, cum_var == 0.80), aes(x = PC, y = cum_var), color = "red", size = 3) +  # Add red point at the threshold
+  ylab("Cumulative Variance") + # Changed y-axis label
+  xlab("sPCs") + theme_classic() + theme_bw()
+dev.off()
+```
+
+
+```{r}
+# Create spca reduction on mouse object and save
+combined[["spca"]] <- CreateDimReducObject(embeddings = mouse_embeddings$x, loadings = mouse_embeddings$rotation, key = "spca")
+saveRDS(combined, file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_spca_loadings.RData"))
+#combined <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_spca_loadings.RData"))
+```
+
+
+
+```{r}
+# Pull feature sparse principal component loadings from object
+principal_components <- combined@reductions$spca@feature.loadings
+head(principal_components)
+principal_components <- as.data.frame(principal_components)
+```
+
+
+
+## Set Up Human Data
+```{r}
+# Load human data, pull out only good human microglia
+human <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/human_adwt_labeled_ortholog.RData"))
+microglia <- subset(human, subset = summary == "Microglia")
+microglia
+good_microglia <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/good_microglia_barcodes.RData"))
+human <- subset(microglia, cells = good_microglia)
+human
+```
+
+
+
+```{r}
+# Normalize and Scale data, pull human gex_matrix
+DefaultAssay(human) <- "RNA"
+human <- NormalizeData(human)
+all.genes <- rownames(human)
+human <- ScaleData(human, features = all.genes)
+human_gex_matrix <- as.data.frame(human@assays$RNA@scale.data)
+```
+
+
+
+```{r}
+# Confirming only orthologs in GEX matrix
+ortholog_mat <- convert_orthologs(gene_df = row.names(human_gex_matrix),
+                                    input_species = "human",
+                                    output_species = "mouse",
+                                    non121_strategy = "drop_both_species")
+# Filtering the orthologs based on the 15607 principal component loadings
+ortholog_mat <- ortholog_mat %>%
+  filter(row.names(ortholog_mat) %in% row.names(principal_components))
+# Filter the human_gex_matrix based on the 15607 principal component loadings
+human_gex_matrix <- human_gex_matrix %>%
+  filter(row.names(human_gex_matrix) %in% ortholog_mat$input_gene)
+# Ordering human_gex_matrix in the same manner as the pc loadings
+row.names(human_gex_matrix) <- row.names(ortholog_mat)
+
+# Arrange alphabetically 
+principal_components  <- principal_components %>%
+  arrange(row.names(principal_components))
+# Arrange alphabetically 
+human_gex_matrix <- human_gex_matrix %>%
+  arrange(row.names(human_gex_matrix))
+```
+
+```{r}
+# converting to matrix
+principal_components <- as.matrix(principal_components)
+human_gex_matrix <- as.matrix(human_gex_matrix)
+# Ensuring equal rows, equals 15532
+ncol(t(principal_components))
+nrow(human_gex_matrix)
+# assigning human names to pc matrix
+principal_components <- principal_components[row.names(human_gex_matrix),]
+# Multiplies the transpose of the principal component matrix by the human gex matrix
+multiplication <- t(principal_components) %*% human_gex_matrix
+# Creates new dimensional reduction on human Seurat object with the spc projections
+human[["spca_projections"]] <- CreateDimReducObject(embeddings = t(multiplication), key = "spca_proj")
+```
+
+
+## Running on PCs encapsulating 80% variance
+```{r}
+# Add human cell embeddings to Seurat metadata
+human <- AddMetaData(human, human@reductions$spca_projections@cell.embeddings, col.name = colnames(human@reductions$spca_projections@cell.embeddings))
+```
+
+```{r}
+# Add dummy variable to classify cell as AD or C
+human@meta.data$dv <- 0
+Idents(human) <- human@meta.data$dv
+human_ad <- subset(human, subset = Genotype == "AD")
+Idents(human, cells = Cells(human_ad)) <- 1
+human@meta.data$dv <- Idents(human)
+Idents(human) <- human@meta.data$summary
+table(human@meta.data$Genotype, human@meta.data$dv)
+```
+
+
+```{r}
+#saveRDS(human, file = paste0(home_dir, "/AD_human_objects_ortholog/human_mouse_proj_spca.RData"))
+human <- readRDS(paste0(home_dir, "/AD_human_objects_ortholog/human_mouse_proj_spca.RData"))
+```
+
+
+```{r}
+# Run GLM with all PCs
+ad.model <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36 + spcaproj_37, data = human@meta.data, family = binomial)
+```
+
+```{r}
+summary(ad.model)
+```
+
+
+```{r}
+saveRDS(ad.model, file = paste0(home_dir, "/AD_human_objects_ortholog/spca_glm_80_var.RData"))
+```
+
+## AIC Optimized
+```{r}
+human <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/human_mouse_proj_spca.RData"))
+```
+
+```{r}
+# Run GLM
+ad.model <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36 + spcaproj_37
+                 , data = human@meta.data, family = binomial)
+```
+
+
+
+```{r message=FALSE, include=FALSE}
+ad.model <- stepAIC(ad.model, direction = "both")
+```
+
+```{r}
+summary(ad.model)
+```
+
+```{r}
+saveRDS(ad.model, file = paste0(home_dir, "/AD_human_objects_ortholog/spca_glm_aic_optim.RData"))
+```
+
+```{r}
+ad.model <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/spca_glm_aic_optimized.RData"))
+summary(ad.model)
+```
+
+
+
+## AIC Optimized w/ test/train
+```{r}
+human_spca <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/human_mouse_proj_spca.RData"))
+```
+
+```{r}
+set.seed(428)
+all_data_spca <- human_spca@meta.data[,c(17:53, 67)]
+sample_spca <- sample(c(TRUE,FALSE), nrow(all_data_spca),  
+                 replace=TRUE, prob=c(0.8,0.2)) 
+```
+
+```{r}
+# creating training dataset 
+train_data_spca  <- all_data_spca[sample_spca, ] 
+  
+# creating testing dataset 
+test_data_spca  <- all_data_spca[!sample_spca, ] 
+```
+
+
+```{r}
+# Run GLM
+ad.model <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36 + spcaproj_37
+                 , data = train_data_spca, family = binomial)
+```
+
+```{r include=FALSE}
+final_model <- stepAIC(ad.model, direction = "both")
+```
+
+```{r}
+summary(final_model)
+```
+
+```{r}
+predictions_spca <- predict(final_model, newdata = test_data_spca, type = "response")
+```
+
+
+```{r}
+roc_spca <- roc(test_data_spca$dv, predictions_spca)
+roc_spca
+```
+
+```{r}
+plot(roc_spca, main = "ROC Curve (sPCA Model)", col = "blue", lwd = 2, print.auc = TRUE)
+```
+
+
+## Lasso
+```{r}
+human_spca <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/human_mouse_proj_spca.RData"))
+```
+
+```{r}
+head(as.data.frame(human_spca@reductions$pca@cell.embeddings))
+head(as.data.frame(human_spca@reductions$spca_projections@cell.embeddings))
+
+```
+
+
+
+```{r}
+set.seed(428)
+all_data_spca <- human_spca@meta.data[,c(17:53, 67)]
+sample_spca <- sample(c(TRUE,FALSE), nrow(all_data_spca),  
+                 replace=TRUE, prob=c(0.8,0.2))
+```
+
+```{r}
+# creating training dataset 
+train_data_spca  <- all_data_spca[sample_spca, ] 
+  
+# creating testing dataset 
+test_data_spca  <- all_data_spca[!sample_spca, ] 
+```
+
+```{r}
+predictors <- as.matrix(train_data_spca[,1:37])
+response <- train_data_spca$dv
+```
+
+
+```{r}
+# Determine lambda
+cv.lasso <- cv.glmnet(predictors, response, family = "binomial")
+plot(cv.lasso)
+cv.lasso$lambda.min
+coef(cv.lasso, s = "lambda.1se")
+```
+
+
+```{r}
+# Final model with lambda.min
+lasso.model <- glmnet(predictors, response, alpha = 1, family = "binomial",
+                      lambda = cv.lasso$lambda.1se)
+```
+
+
+```{r}
+predictions_spca <- predict.glmnet(lasso.model, newx = as.matrix(test_data_spca[,1:37]), type = "response")
+```
+
+```{r}
+roc_pca <- roc(test_data_spca$dv, predictions_spca)
+roc_pca
+```
+
+## Visualizing Highly Different PCs
+```{r}
+# plot pc projections to visualize
+for(i in 2:50){
+p1 <- DimPlot(human, reduction = "spca_projections", dims = c(1, i), group.by = "Genotype")
+ggsave(filename = paste0(home_dir, "/pc_plot_spca/pc_", i, ".pdf"))
+}
+```
+
+
+```{r}
+# Deviance barplot visualization
+anova_df <- anova(ad.model2)
+anova_df <- anova_df %>%
+  arrange(desc(Deviance))
+anova_df <- anova_df %>%
+  filter(!row.names(anova_df) %in% c("NULL"))
+anova_df
+
+p2 <- ggplot(anova_df, aes(x = reorder(row.names(anova_df), Deviance), y = Deviance)) + 
+  geom_bar(stat = "identity") + coord_flip() +
+  scale_y_log10() + 
+  labs(x = "Principal Component",
+       title = "Significant sPCA Loadings") + 
+  theme(axis.text.y = element_text(size = 8))
+
+cairo_ps(filename= paste0(home_dir, "/Figures/Figure 3/3C_spca.eps"), width = 9, height = 7) # name the file as an EPS
+p2 #variable of the figure that is defined/saved, can be used any name
+dev.off()
+```
+
+
+
+```{r}
+sessionInfo()
+```
+
+
+
+# Trying sPCA optimization
+```{r}
+mouse_mat <- as.matrix(t(combined@assays$RNA@scale.data))
+```
+
+
+```{r}
+set.seed(480) # for reproducibility with this case study, remove otherwise
+test.keepX <- c(seq(5, 995, 50)) # set the number of variable values to be tested
+
+tune.spca.res <- tune.spca(mouse_mat, ncomp = 5, # generate the first 5 components
+                           nrepeat = 5, # repeat the cross-validation 5 times
+                           folds = 3, # use 3 folds for the cross-validation
+                           test.keepX = test.keepX,
+                           scale = FALSE,
+                           center = TRUE)
+```
+

@@ -1,0 +1,557 @@
+---
+title: "AD Sparsity Analysis"
+author: "Alexander Bergendorf"
+date: "2024-06-05"
+output: html_document
+---
+
+
+# Library Import
+```{r}
+library(Seurat)
+library(mixOmics)
+library(tidyverse)
+library(orthogene)
+library(dittoSeq)
+library(elasticnet)
+library(MASS)
+library(pROC)
+library(coop)
+#home_dir <- "C:/Users/aberg/OneDrive/Desktop/Research_Brubaker/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+home_dir <- "C:/Users/Alexander/OneDrive/Desktop/Research_Brubaker/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+```
+
+# Sparsity of Dataset
+```{r include=FALSE}
+features <- seq(250, 15500, 250)
+sparsity <- c()
+
+combined <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_adwt_labeled.RData"))
+  combined <- subset(combined, subset = summary == "Microglia")
+  good_microglia <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/good_microglia_barcodes.RData"))
+  combined <- subset(combined, cells = good_microglia)
+
+for(i in features){
+# Rerunning sPCA after filtering
+  DefaultAssay(combined) <- "RNA"
+  combined <- NormalizeData(combined)
+  combined <- FindVariableFeatures(combined, selection.method = "vst", nfeatures = i)
+  all.genes <- rownames(combined)
+  
+  nrow(combined@assays$RNA@data[VariableFeatures(object = combined),])
+  
+  sparsity_temp <- sparsity(as.matrix(combined@assays$RNA@data[VariableFeatures(object = combined),]))
+  sparsity <- c(sparsity, sparsity_temp)
+}
+```
+
+```{r}
+data <- data.frame(features = features, sparsity = sparsity)
+
+# Create scatterplot
+ggplot(data, aes(x = features, y = sparsity)) +
+  geom_point() +
+  labs(x = "Features", y = "Sparsity") +
+  ggtitle("Scatterplot of Features vs. Sparsity") +
+  theme_minimal()
+ggsave(filename = paste0(home_dir, "/Manuscript and Figures/Supplemental Figure 2/S2A.eps"), width = 7, height = 7)
+write.csv(data, paste0(home_dir, "/sparsity.csv"))
+```
+
+
+
+# Regular PCA sparsity exploration
+```{r}
+components <- seq(250, 15500, 250)
+
+auc_vec <- list()
+aic_vec <- list()
+for(i in components){
+  combined <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_adwt_labeled.RData"))
+  combined <- subset(combined, subset = summary == "Microglia")
+  good_microglia <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/good_microglia_barcodes.RData"))
+  combined <- subset(combined, cells = good_microglia)
+  
+  # Rerunning PCA after filtering
+  DefaultAssay(combined) <- "RNA"
+  combined <- NormalizeData(combined)
+  combined <- FindVariableFeatures(combined, selection.method = "vst", nfeatures = i)
+  all.genes <- rownames(combined)
+  combined <- ScaleData(combined, features = all.genes)
+  combined <- RunPCA(combined, features = VariableFeatures(object = combined))
+  
+  
+  # Pull principal components from Seurat object
+  principal_components <- combined@reductions$pca@feature.loadings
+  head(principal_components)
+  principal_components <- as.data.frame(principal_components)
+  
+  # Load human data, pull out only good human microglia
+  human <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/human_adwt_labeled_ortholog.RData"))
+  microglia <- subset(human, subset = summary == "Microglia")
+  microglia
+  good_microglia <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/good_microglia_barcodes.RData"))
+  human <- subset(microglia, cells = good_microglia)
+  
+  # Isolating Human data
+  DefaultAssay(human) <- "RNA"
+  human <- NormalizeData(human)
+  all.genes <- rownames(human)
+  human <- ScaleData(human, features = all.genes)
+  human_gex_matrix <- as.data.frame(human@assays$RNA@scale.data)
+  
+  # Confirming only orthologs in GEX matrix
+  ortholog_mat <- convert_orthologs(gene_df = row.names(human_gex_matrix),
+                                    input_species = "human",
+                                    output_species = "mouse",
+                                    non121_strategy = "drop_both_species")
+
+ # Confirming only orthologs in GEX matrix
+  ortholog_mat <- convert_orthologs(gene_df = row.names(human_gex_matrix),
+                                    input_species = "human",
+                                    output_species = "mouse",
+                                    non121_strategy = "drop_both_species")
+  
+   # Filtering the orthologs based on the 3000 principal component loadings
+  ortholog_mat <- ortholog_mat %>%
+    filter(row.names(ortholog_mat) %in% row.names(principal_components))
+  # Filtering the human gex matrix based on the 3000 principal component loadings
+  human_gex_matrix <- human_gex_matrix %>%
+   filter(row.names(human_gex_matrix) %in% ortholog_mat$input_gene)
+  # Ordering human_gex_matrix in the same manner as the pc loadings
+  row.names(human_gex_matrix) <- row.names(ortholog_mat)
+
+  # Arrange alphabetically 
+  principal_components  <- principal_components %>%
+    arrange(row.names(principal_components))
+  # Arrange alphabetically
+  human_gex_matrix <- human_gex_matrix %>%
+    arrange(row.names(human_gex_matrix))
+
+  # converting to matrix
+  principal_components <- as.matrix(principal_components)
+  human_gex_matrix <- as.matrix(human_gex_matrix)
+
+  # assigning human names to pc matrix
+  principal_components <- principal_components[row.names(human_gex_matrix),]
+
+  # Ensuring equal rows, equals 3000
+  ncol(t(principal_components))
+  nrow(human_gex_matrix)
+
+  # Multiplies the transpose of the principal component matrix by the human gex matrix
+  multiplication <- t(principal_components) %*% human_gex_matrix
+
+  # Creates new dimensional reduction on human Seurat object with the pc projections
+  human[["pca_projections"]] <- CreateDimReducObject(embeddings = t(multiplication), key = "pca_proj")
+  
+  # Add human cell embeddings to Seurat metadata
+  human <- AddMetaData(human, human@reductions$pca_projections@cell.embeddings, col.name =  colnames(human@reductions$pca_projections@cell.embeddings))
+
+  # Add dummy variable to classify cell as AD or C
+  human@meta.data$dv <- 0
+  Idents(human) <- human@meta.data$dv
+  human_ad <- subset(human, subset = Genotype == "AD")
+  Idents(human, cells = Cells(human_ad)) <- 1
+  human@meta.data$dv <- Idents(human)
+  Idents(human) <- human@meta.data$summary
+  table(human@meta.data$Genotype, human@meta.data$dv)
+
+  # Variances of mosue PCs
+  stdev <- combined@reductions$pca@stdev
+  variance <- stdev^2
+  variance <- variance / sum(variance)
+  
+  variance_explained <- variance
+  
+  variance_explained <- variance_explained /sum(variance_explained)
+  variance_explained <- as.data.frame(variance_explained)
+  colnames(variance_explained) <- c("sdev")
+  variance_explained$cum_var <- cumsum(variance_explained$sdev)
+  variance_explained$observation <- 1:nrow(variance_explained) 
+  variance_explained <- variance_explained %>%
+    filter(cum_var < 0.8)
+  variance_explained
+  PCs <-as.numeric(nrow(variance_explained))
+  PCs <- unlist(PCs)
+
+  set.seed(428)
+  all_data_pca <- human@meta.data[,c(17:67)]
+  sample_pca <- sample(c(TRUE,FALSE), nrow(all_data_pca),  
+                 replace=TRUE, prob=c(0.8,0.2)) 
+
+  num_cols <- ncol(all_data_pca)
+
+
+  # creating training dataset 
+  train_data_pca  <- all_data_pca[sample_pca, ]  
+  train_data_pca <- train_data_pca[,c(1:PCs, num_cols)] 
+
+  # creating testing dataset 
+  test_data_pca  <- all_data_pca[!sample_pca, ] 
+
+
+  # Run GLM
+  ad.model <- glm(dv ~ .
+                 , data = train_data_pca, family = binomial)
+
+  final_model <- stepAIC(ad.model, direction = "both")
+
+  predictions_pca <- predict(final_model, newdata = test_data_pca, type = "response")
+
+  roc_pca <- roc(test_data_pca$dv, predictions_pca)
+  auc_vec[as.character(i)] <- roc_pca$auc
+  aic_vec[as.character(i)] <- final_model$aic
+  saveRDS(aic_vec, "C:/Users/aberg/OneDrive/Desktop/aic_pca_1.RData")
+  saveRDS(auc_vec, "C:/Users/aberg/OneDrive/Desktop/auc_pca_1.RData")
+}
+
+```
+
+
+# Sparse PCA sparsity exploration
+```{r}
+components <- c(6750, 7000, 7250)
+auc_vec <- list()
+aic_vec <- list()
+
+for(i in components){
+  combined <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_adwt_labeled.RData"))
+  combined <- subset(combined, subset = summary == "Microglia")
+  good_microglia <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/good_microglia_barcodes.RData"))
+  combined <- subset(combined, cells = good_microglia)
+  
+
+  # Rerunning sPCA after filtering
+  DefaultAssay(combined) <- "RNA"
+  combined <- NormalizeData(combined)
+  combined <- FindVariableFeatures(combined, selection.method = "vst", nfeatures = i)
+  all.genes <- rownames(combined)
+  
+  nrow(combined@assays$RNA@data[VariableFeatures(object = combined),])
+  
+  sparsity(as.matrix(combined@assays$RNA@data[VariableFeatures(object = combined),]))
+
+  combined <- ScaleData(combined, features = all.genes, do.center = FALSE)
+
+  
+  mouse_mat <- as.matrix(t(combined@assays$RNA@scale.data[VariableFeatures(object = combined),]))
+  mouse_embeddings <- mixOmics::spca(mouse_mat, ncomp = 50, scale = FALSE, center = TRUE)
+  plot(mouse_embeddings)
+  
+  #Assign Embeddings to Mouse object
+  combined[["spca"]] <- CreateDimReducObject(embeddings = mouse_embeddings$x, loadings = mouse_embeddings$rotation, key = "spca")
+  
+  principle_components <- combined@reductions$spca@feature.loadings
+  head(principle_components)
+  principle_components <- as.data.frame(principle_components) 
+  
+  # Load human data, pull out only good human microglia
+  human <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/human_adwt_labeled_ortholog.RData"))
+  microglia <- subset(human, subset = summary == "Microglia")
+  microglia
+  good_microglia <- readRDS(file = paste0(home_dir, "/AD_human_objects_ortholog/good_microglia_barcodes.RData"))
+  human <- subset(microglia, cells = good_microglia)
+  human
+  
+  # Normalize and Scale data, pull human gex_matrix
+  DefaultAssay(human) <- "RNA"
+  human <- NormalizeData(human)
+  all.genes <- rownames(human)
+  human <- ScaleData(human, features = all.genes)
+  human_gex_matrix <- as.data.frame(human@assays$RNA@scale.data)
+  
+  # Confirming only orthologs in GEX matrix
+  ortholog_mat <- convert_orthologs(gene_df = row.names(human_gex_matrix),
+                                    input_species = "human",
+                                    output_species = "mouse",
+                                    non121_strategy = "drop_both_species")
+  # Filtering the orthologs based on the 15607 principal component loadings
+  ortholog_mat <- ortholog_mat %>%
+    filter(row.names(ortholog_mat) %in% row.names(principle_components))
+  # Filter the human_gex_matrix based on the 15607 principal component loadings
+  human_gex_matrix <- human_gex_matrix %>%
+    filter(row.names(human_gex_matrix) %in% ortholog_mat$input_gene)
+  # Ordering human_gex_matrix in the same manner as the pc loadings
+  row.names(human_gex_matrix) <- row.names(ortholog_mat)
+
+  # Arrange alphabetically 
+  principle_components  <- principle_components %>%
+    arrange(row.names(principle_components))
+  # Arrange alphabetically 
+  human_gex_matrix <- human_gex_matrix %>%
+    arrange(row.names(human_gex_matrix))
+  
+  # converting to matrix
+  principle_components <- as.matrix(principle_components)
+  human_gex_matrix <- as.matrix(human_gex_matrix)
+  # Ensuring equal rows, equals 
+  ncol(t(principle_components))
+  nrow(human_gex_matrix)
+  
+  # assigning human names to pc matrix
+  principle_components <- principle_components[row.names(human_gex_matrix),]
+  # Multiplies the transpose of the principal component matrix by the human gex matrix
+  multiplication <- t(principle_components) %*% human_gex_matrix
+  # Creates new dimensional reduction on human Seurat object with the spc projections
+  human[["spca_projections"]] <- CreateDimReducObject(embeddings = t(multiplication), key = "spca_proj")
+  
+  # Add human cell embeddings to Seurat metadata
+  human <- AddMetaData(human, human@reductions$spca_projections@cell.embeddings, col.name =  colnames(human@reductions$spca_projections@cell.embeddings))
+
+  # Add dummy variable to classify cell as AD or C
+  human@meta.data$dv <- 0
+  Idents(human) <- human@meta.data$dv
+  human_ad <- subset(human, subset = Genotype == "AD")
+  Idents(human, cells = Cells(human_ad)) <- 1
+  human@meta.data$dv <- Idents(human)
+  Idents(human) <- human@meta.data$summary
+  table(human@meta.data$Genotype, human@meta.data$dv)
+
+  variance_explained <- mouse_embeddings$prop_expl_var$X
+  variance_explained <- variance_explained /sum(variance_explained)
+  variance_explained <- as.data.frame(variance_explained)
+  colnames(variance_explained) <- c("sdev")
+  variance_explained$cum_var <- cumsum(variance_explained$sdev)
+  variance_explained$observation <- 1:nrow(variance_explained) 
+  variance_explained <- variance_explained %>%
+    filter(cum_var < 0.8)
+  variance_explained
+  PCs <-as.numeric(nrow(variance_explained))
+  PCs <- unlist(PCs)
+
+  set.seed(428)
+  all_data_spca <- human@meta.data[,c(17:67)]
+  sample_spca <- sample(c(TRUE,FALSE), nrow(all_data_spca),  
+                 replace=TRUE, prob=c(0.8,0.2)) 
+
+  num_cols <- ncol(all_data_spca)
+
+
+  # creating training dataset 
+  train_data_spca  <- all_data_spca[sample_spca, ]  
+  train_data_spca <- train_data_spca[,c(1:PCs, num_cols)] 
+
+  # creating testing dataset 
+  test_data_spca  <- all_data_spca[!sample_spca, ] 
+
+
+  # Run GLM
+  ad.model <- glm(dv ~ .
+                 , data = train_data_spca, family = binomial)
+
+  final_model <- stepAIC(ad.model, direction = "both")
+
+  predictions_spca <- predict(final_model, newdata = test_data_spca, type = "response")
+
+  roc_spca <- roc(test_data_spca$dv, predictions_spca)
+  auc_vec[as.character(i)] <- roc_spca$auc
+  aic_vec[as.character(i)] <- final_model$aic
+  
+}
+  
+saveRDS(aic_vec, "C:/Users/aberg/OneDrive/Desktop/aic_spca.RData")
+saveRDS(auc_vec, "C:/Users/aberg/OneDrive/Desktop/auc_spca.RData")
+```
+
+
+# Performance Characterization
+```{r}
+variables <- c(2, 3, 4, 5, 6, 7)
+aic_scores <- readRDS("C:/Users/aberg/OneDrive/Desktop/aic.RData")
+auc_scores <- readRDS("C:/Users/aberg/OneDrive/Desktop/auc.RData")
+for(i in variables){
+aic_temp <- readRDS(paste0("C:/Users/aberg/OneDrive/Desktop/aic_", i,".RData"))
+auc_temp <- readRDS(paste0("C:/Users/aberg/OneDrive/Desktop/auc_", i,".RData"))
+                   
+aic_scores <- c(aic_scores, aic_temp)
+auc_scores <- c(auc_scores, auc_temp)                   
+}
+
+```
+
+## AIC Scores
+```{r}
+# Convert list to dataframe
+df_spca <- as.data.frame(aic_scores)
+
+# Reshape the dataframe
+df_spca <- reshape2::melt(df_spca)
+
+# Rename columns if needed
+colnames(df_spca) <- c("Features", "AIC_sPCA")
+
+# Print the resulting dataframe
+df_spca$Features <- gsub("X", "",df_spca$Features)
+df_spca$Features <- as.numeric(df_spca$Features)
+saveRDS(df_spca, paste0(home_dir, "/aic_spca.RData"))
+```
+
+
+```{r}
+aic_pca <- readRDS(paste0(home_dir, "/aic_pca.RData"))
+
+df_pca <- as.data.frame(aic_pca)
+
+# Reshape the dataframe
+df_pca <- reshape2::melt(df_pca)
+
+# Rename columns if needed 
+colnames(df_pca) <- c("Features", "AIC_PCA")
+
+df_pca$Features <- gsub("X", "",df_pca$Features)
+df_pca$Features <- as.numeric(df_pca$Features)
+df_pca
+```
+
+```{r}
+df_spca <- readRDS(paste0(home_dir, "/aic_spca.RData"))
+
+aic_df <- full_join(df_spca, df_pca)
+aic_df <- aic_df %>%
+  filter(Features != 12000.1)
+aic_df <- data.frame(c(aic_df$Features, aic_df$Features), c(aic_df$AIC_PCA, aic_df$AIC_sPCA))
+colnames(aic_df) <- c("Features", "AIC")
+aic_df$Category <- c(rep("PCA", 62), rep("sPCA", 62))
+aic_df
+```
+
+```{r}
+ggplot(aic_df, aes(x = Features, y = AIC, color = Category)) +
+  geom_point() +  
+  labs(x = "Features", y = "AIC", color = "Technique") +  
+  ggtitle("Scatterplot of AIC by Features") + 
+  theme_minimal()  
+ggsave(filename = paste0(home_dir, "/Manuscript and Figures/Supplemental Figure 2/S2B.eps"), width = 7, height = 7)
+```
+
+```{r}
+df_max_aic <- aic_df %>%
+  group_by(Features, Category) %>%
+  summarize(Max_AIC = max(AIC))
+
+# Pivot data to compare Category1 and Category2 AUCs
+df_comparison <- df_max_aic %>%
+  pivot_wider(names_from = Category, values_from = Max_AIC, names_prefix = "Max_AIC_")
+
+df_comparison <- df_comparison %>%
+  mutate(Lower_AIC = ifelse(Max_AIC_PCA < Max_AIC_sPCA, "PCA", "sPCA"))
+
+# Print comparison
+df_comparison
+
+```
+
+```{r}
+data <- read.csv(paste0(home_dir, "/sparsity.csv"))
+data$Lower_AIC <- df_comparison$Lower_AIC
+```
+
+
+
+
+```{r}
+ggplot(data, aes(x = features, y = sparsity, fill = Lower_AIC)) +
+  geom_point(shape = 21, size = 2, color = "black") +  # Use shape 21 for filled circles
+  labs(x = "Features", y = "Sparsity", fill = "Lower AIC") +
+  ggtitle("Scatterplot of Features vs Sparsity (Colored by Lower AIC)") +
+  theme_minimal()
+ggsave(filename = paste0(home_dir, "/Manuscript and Figures/Supplemental Figure 2/S2C.eps"), width = 7, height = 7)
+```
+
+
+## AUC Scores
+```{r}
+# Convert list to dataframe
+df_spca <- as.data.frame(auc_scores)
+
+# Reshape the dataframe
+df_spca <- reshape2::melt(df_spca)
+
+# Rename columns if needed
+colnames(df_spca) <- c("Features", "AIC_sPCA")
+
+# Print the resulting dataframe
+df_spca$Features <- gsub("X", "",df_spca$Features)
+df_spca$Features <- as.numeric(df_spca$Features)
+df_spca
+saveRDS(df_spca, paste0(home_dir, "/auc_spca.RData"))
+```
+
+
+```{r}
+aic_pca <- readRDS(paste0(home_dir,"/auc_pca.RData"))
+
+df_pca <- as.data.frame(aic_pca)
+
+# Reshape the dataframe
+df_pca <- reshape2::melt(df_pca)
+
+# Rename columns if needed
+colnames(df_pca) <- c("Features", "AIC_PCA")
+
+df_pca$Features <- gsub("X", "",df_pca$Features)
+df_pca$Features <- as.numeric(df_pca$Features)
+df_pca
+```
+
+```{r}
+df_spca <- readRDS(paste0(home_dir, "/auc_spca.RData"))
+
+auc_df <- full_join(df_spca, df_pca)
+auc_df <- auc_df %>%
+  filter(Features != 12000.1)
+auc_df <- data.frame(c(auc_df$Features, auc_df$Features), c(auc_df$AIC_PCA, auc_df$AIC_sPCA))
+colnames(auc_df) <- c("Features", "AUC")
+auc_df$Category <- c(rep("PCA", 62), rep("sPCA", 62))
+auc_df
+```
+
+
+
+```{r}
+ggplot(auc_df, aes(x = Features, y = AUC, color = Category)) +
+  geom_point() +  
+  labs(x = "Features", y = "AUC", color = "Technique") + 
+  ggtitle("Scatterplot of AUC by Features") +  
+  theme_minimal()  
+ggsave(filename = paste0(home_dir, "/Manuscript and Figures/Supplemental Figure 2/S2D.eps"), width = 7, height = 7)
+```
+
+```{r}
+df_max_auc <- auc_df %>%
+  group_by(Features, Category) %>%
+  summarize(Max_AUC = max(AUC))
+
+# Pivot data to compare Category1 and Category2 AUCs
+df_comparison <- df_max_auc %>%
+  pivot_wider(names_from = Category, values_from = Max_AUC, names_prefix = "Max_AUC_")
+
+df_comparison <- df_comparison %>%
+  mutate(Higher_AUC = ifelse(Max_AUC_PCA > Max_AUC_sPCA, "PCA", "sPCA"))
+
+# Print comparison
+df_comparison
+
+```
+
+```{r}
+data <- read.csv(paste0(home_dir, "/sparsity.csv"))
+data$Higher_AUC <- df_comparison$Higher_AUC
+```
+
+```{r}
+ggplot(data, aes(x = features, y = sparsity, fill = Higher_AUC)) +
+  geom_point(shape = 21, size = 2, color = "black") + 
+  labs(x = "Features", y = "Sparsity", fill = "Higher AUC") +
+  ggtitle("Scatterplot of Features vs Sparsity (Colored by Higher AUC)") +
+  theme_minimal()
+ggsave(filename = paste0(home_dir, "/Manuscript and Figures/Supplemental Figure 2/S2E.eps"), width = 7, height = 7)
+```
+
+# Session Info
+```{r}
+sessionInfo()
+```
+
+
