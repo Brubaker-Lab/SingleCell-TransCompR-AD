@@ -1,0 +1,145 @@
+---
+title: "Drug_microglia"
+output: html_drug_microglia
+---
+
+```{r}
+
+# correlation between all drugs and mouse loadings 
+filtered_cp_mean_coeff <- read.csv(".../filtered_cp_mean_coeff.csv")
+cp_f <- filtered_cp_mean_coeff
+
+# reformat the matrix 
+row.names(cp_f) <- filtered_cp_mean_coeff$X
+cp_f <- cp_f[,-1]
+cp_f <- as.matrix(cp_f)
+
+# filter out duplicated drugs 
+unique_cp <- cp_f[!duplicated(cp_f),]
+cp_t <- t(unique_cp)
+
+# find differentially expressed genes of drugs 
+deg_drug <- list()
+for (x in 1:ncol(cp_t)) {
+  # normalize data, z-score
+  norm_drug <- scale(as.numeric(as.matrix(cp_t[,x])), center = TRUE, scale = TRUE)
+  row.names(norm_drug) <- row.names(cp_t) 
+  
+  # get genes for each drug p-value less than 0.05 
+  drug_pval <- 2*pnorm(q = abs(norm_drug), lower.tail= FALSE)
+  sig_drug <- drug_pval[(drug_pval <= 0.05),]
+  df_sig_drug <- as.data.frame(sig_drug)
+  
+  # get the original coefficient values from filtered drug list 
+  drug_names <- row.names(df_sig_drug)
+  filt_drug <- cp_t[c(drug_names),x]
+  
+  deg_drug[[x]] <- filt_drug
+}
+
+# import mouse spca loadings 
+`mouse_spca_loadings` <- read.csv(".../mouse_spca_loadings.csv")
+mouse_spca <- mouse_spca_loadings
+row.names(mouse_spca) <- mouse_spca$X
+mouse_loading_f <- mouse_spca[,-1]
+  
+# get correlation for each drug with each mouse loading 
+alldrug_cor <- list()
+# get the overlap genes between drug and the PC loadings
+int_dm <- list()
+for (x in 1:length(deg_drug)) { 
+  fdrug_loading <- intersect(names(deg_drug[[x]]), row.names(mouse_loading_f))
+  int_dm[[x]] <- fdrug_loading
+  # get only drug genes CDs 
+  fdrug <- as.data.frame(deg_drug[[x]][c(fdrug_loading)])
+  row.names(fdrug) <- fdrug_loading
+  # get only filtered mouse loadings based on the selected genes 
+  fmouse <- mouse_loading_f[c(fdrug_loading),]
+  
+  # spearman correlation between drug genes and loading genes
+  drug_load_cor <- apply(fmouse, 2, function(x) cor.test(x, as.numeric(fdrug$`deg_drug[[x]][c(fdrug_loading)]`), method = c("spearman")))
+  alldrug_cor[[x]] <- drug_load_cor
+}
+
+```
+
+```{r}
+# get the drugs correlations for only PC of interest 
+pc_pvalue <- numeric(0) 
+pc_rho <- numeric(0) 
+for (i in 1:length(alldrug_cor)) { 
+  # change the pc idx depending which PC we want 
+  pc_idx <- 5
+  pc_pvalue[i] <- alldrug_cor[[i]][[pc_idx]]$p.value
+  pc_rho[i] <- alldrug_cor[[i]][[pc_idx]]$estimate
+}
+
+# combine p-value and rho values 
+pc_pval_rho <- cbind(pc_pvalue, pc_rho)
+row.names(pc_pval_rho) <- colnames(cp_t)
+
+# FDR correction adjust p-value BH 
+fdr_pcpval <- p.adjust(pc_pval_rho[,1], method = c("BH"))
+pc_qval_rho <- pc_pval_rho
+pc_qval_rho[,1] <-fdr_pcpval
+colnames(pc_qval_rho)[1] <- c("pc_qvalue")
+sig_pcqval_rho <- pc_qval_rho[(pc_qval_rho[,1]<= 0.05),]
+
+rankpc_rho <- rank(sig_pcqval_rho[,2])
+rank_rho_pc <- cbind(rankpc_rho, sig_pcqval_rho)
+rank_rho_pc <- as.data.frame(rank_rho_pc)
+
+# order the values increasing 
+or_rank_rho_pc <- rank_rho_pc[order(rank_rho_pc$rankpc_rho),]
+write.csv(or_rank_rho_pc, "spc5_drug_qrho_fdr.csv")
+
+# no FDR correction
+sig_pcpval_rho <- pc_pval_rho[(pc_pval_rho[,1] <= 0.05),]
+
+rankpc_rho <- rank(sig_pcpval_rho[,2])
+rank_rho_pc <- cbind(rankpc_rho, sig_pcpval_rho[,2])
+rank_rho_pc <- as.data.frame(rank_rho_pc)
+
+# order the values increasing 
+or_rank_rho_pc <- rank_rho_pc[order(rank_rho_pc$rankpc_rho),]
+write.csv(or_rank_rho_pc, "spc5_drug_rho.csv")
+
+# plot correlation
+library(ggplot2)
+svg("rho_pc5_pval.svg", width=5, height=5)
+theme_set(theme_bw())
+ggplot(rank_rho_pc, aes(x=as.numeric(rank_rho_pc[,1]), y=as.numeric(rank_rho_pc[,2]))) + 
+  geom_point(pch=16, size=2) + labs(x="Rank", y="Spearman's rho") + 
+  theme(panel.grid = element_blank()) +
+  scale_x_continuous(n.breaks=10) +
+  scale_y_continuous(n.breaks=9)
+dev.off()
+
+
+```
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+
+drug_names <- "safinamide"
+drug_idx <- which(colnames(cp_t) %in% drug_names)
+pc_idx <- 5
+
+# plot the spearman correlation scatterplot 
+df_pc <- data.frame(as.numeric(deg_drug[[drug_idx]][c(int_dm[[drug_idx]])]),mouse_loading_f[c(int_dm[[drug_idx]]),pc_idx])
+label <- int_dm[[drug_idx]] 
+
+svg('safinamide_spc5_un_FDA.svg', width = 4, height = 4)
+theme_set(theme_bw())  
+ggplot(df_pc, aes(x=as.numeric(deg_drug[[drug_idx]][c(int_dm[[drug_idx]])]), y=mouse_loading_f[c(int_dm[[drug_idx]]),pc_idx])) + 
+  geom_point(pch=16, size=2) + labs(x="Significant safinamide DEGs", y="sPC5") +
+  theme(panel.grid = element_blank()) + 
+  #geom_text(aes(label = label), size=2, vjust = 2) +
+  stat_cor(method = "spearman") 
+dev.off()
+
+
+```
+
+
