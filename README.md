@@ -10,5 +10,5 @@ AD GSEA Ranked - GSEA analysis for significant PCs in PCA and sPCA <br>
 AD Differential Expression Microglia - DE for Microglia <br>
 AD Visualization - Cell count visualization <br>
 FGSEA_RCode - Created fGSEA visualizations <br>
-Microglia_drug_screening - Runs Fisher's test on drugs and calculates correlation between drugs and top/bottom 10% of significant PCs <br>
+Microglia_drug_screening - Runs spearman's correlation between mouse loadings and drug signatures <br>
 VarianceExpPlots - Plots the variance explained in humans vs mice 
