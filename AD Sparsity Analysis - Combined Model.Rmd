@@ -1,0 +1,583 @@
+---
+title: "AD Sparsity Analysis"
+author: "Alexander Bergendorf"
+date: "2024-06-05"
+output: html_document
+---
+
+
+# Library Import
+
+```{r}
+library(Seurat)
+library(mixOmics)
+library(tidyverse)
+library(orthogene)
+library(dittoSeq)
+library(elasticnet)
+library(MASS)
+library(pROC)
+library(coop)
+#home_dir <- "C:/Users/aberg/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+home_dir <- "C:/Users/Alexander/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+```
+
+# Sparsity of Dataset
+
+```{r include=FALSE}
+features <- seq(250, 15500, 250)
+sparsity <- numeric(length(features))  # preallocate
+
+mouse_gse208863 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse208683_microglia_final.RData"))
+mouse_gse140510 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse140510_microglia_final.RData"))
+
+merged <- merge(mouse_gse208863, mouse_gse140510, 
+                add.cell.ids = c("gse208863", "gse140510"), 
+                project = "merged")
+combined <- JoinLayers(merged)
+
+# Normalize once — doesn't depend on nfeatures
+DefaultAssay(combined) <- "RNA"
+combined <- NormalizeData(combined)
+
+# Sparsity helper — keeps the matrix sparse, avoids as.matrix() blowup
+sparsity_fn <- function(m) 1 - (Matrix::nnzero(m) / length(m))
+
+start_time <- Sys.time()
+for (idx in seq_along(features)) {
+  i <- features[idx]
+  
+  combined <- FindVariableFeatures(combined, selection.method = "vst", nfeatures = i)
+  
+  data_mat <- GetAssayData(combined, assay = "RNA", layer = "data")
+  data_mat <- data_mat[VariableFeatures(combined), ]
+  
+  sparsity[idx] <- sparsity_fn(data_mat)
+  
+  elapsed <- round(as.numeric(difftime(Sys.time(), start_time, units = "secs")), 1)
+  message(sprintf("[%d/%d] nfeatures = %5d  |  sparsity = %.4f  |  elapsed = %ss",
+                  idx, length(features), i, sparsity[idx], elapsed))
+}
+```
+
+
+
+```{r}
+data <- data.frame(features = features, sparsity = sparsity)
+
+# Create scatterplot
+ggplot(data, aes(x = features, y = sparsity)) +
+  geom_point() +
+  labs(x = "Features", y = "Sparsity") +
+  ggtitle("Scatterplot of Features vs. Sparsity") +
+  theme_minimal()
+ggsave(filename = paste0(home_dir, "/figures/manuscript/sparsity_analysis_shared_df.pdf"), width = 7, height = 7)
+write.csv(data, paste0(home_dir, "/sparsity.csv"))
+```
+
+# Performing Sparsity Analysis on PCA Data
+
+
+# Regular PCA sparsity exploration
+
+## Setup: load mouse object once, read ortholog matrix, define helper
+
+```{r}
+# Output directory for AIC/AUC results
+out_dir <- "C:/Users/Alexander/OneDrive/Desktop/sparsity_analysis_results"
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+# Read ortholog matrix (15102 1:1 mouse<->human orthologs across 6 datasets)
+# Column "X" (unnamed in CSV) = HUMAN gene symbols (rownames from convert_orthologs)
+# Column "input_gene"          = MOUSE gene symbols (input to convert_orthologs)
+ortholog_df <- read.csv(paste0(home_dir, "/ortholog_matrix_IMPORTANT_6datasets.csv"),
+                        stringsAsFactors = FALSE)
+ortholog_df <- ortholog_df[, c("X", "input_gene")]
+colnames(ortholog_df) <- c("human_gene", "mouse_gene")
+
+# Build merged mouse object once — already-filtered microglia objects per project memory.
+# Normalization is independent of nfeatures, so do it here.
+mouse_gse208863 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse208683_microglia_final.RData"))
+mouse_gse140510 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse140510_microglia_final.RData"))
+merged <- merge(mouse_gse208863, mouse_gse140510,
+                add.cell.ids = c("gse208863", "gse140510"),
+                project = "merged")
+combined_base <- JoinLayers(merged)
+DefaultAssay(combined_base) <- "RNA"
+combined_base <- NormalizeData(combined_base)
+rm(mouse_gse208863, mouse_gse140510, merged)
+
+# Sanity checks — run after combined_base exists
+head(ortholog_df, 5)
+cat("ortholog_df rows:", nrow(ortholog_df), "\n")
+```
+
+
+
+
+
+```{r}
+project_and_score <- function(human, combined, ortholog_df,
+                              variance_threshold = 0.80,
+                              seed = 428) {
+
+  # 1. Pull mouse PCA feature loadings (rows = mouse genes, cols = PC_1..PC_50)
+  principal_components <- as.data.frame(combined@reductions$pca@feature.loadings)
+
+  # 2. Normalize + scale human, pull GEX matrix (rows = human genes, cols = cells)
+  DefaultAssay(human) <- "RNA"
+  human <- NormalizeData(human)
+  all.genes <- rownames(human)
+  human <- ScaleData(human, features = all.genes)
+  human_gex_matrix <- as.data.frame(LayerData(human, assay = "RNA", layer = "scale.data"))
+
+  # 3. Restrict ortholog table to genes present in BOTH the mouse loadings
+  #    AND the human GEX matrix. ortholog_df has columns "mouse_gene" (title-case
+  #    mouse symbols) and "human_gene" (uppercase human symbols).
+  ortho <- ortholog_df %>%
+    filter(mouse_gene %in% rownames(principal_components),
+           human_gene %in% rownames(human_gex_matrix))
+
+  # 4. Subset and align both matrices to that shared, ordered ortholog set
+  principal_components <- principal_components[ortho$mouse_gene, , drop = FALSE]
+  human_gex_matrix     <- human_gex_matrix[ortho$human_gene, , drop = FALSE]
+
+  # Rename human GEX rows to mouse symbols so projection happens in mouse gene space
+  rownames(human_gex_matrix) <- ortho$mouse_gene
+
+  # Sanity check: rows must match exactly, in order
+  stopifnot(identical(rownames(principal_components), rownames(human_gex_matrix)))
+
+  # 5. Project: t(human_GEX) %*% loadings  ->  cells x PCs
+  #    (matches the formulation used to build merged_pca_on_gse175814_microglia_final_pca.RData)
+  principal_components <- as.matrix(principal_components)
+  human_gex_matrix     <- as.matrix(human_gex_matrix)
+  embeddings_mat <- t(human_gex_matrix) %*% principal_components   # cells x PCs
+
+  # 6. Attach projection as a DimReduc on the human object
+  human[["pca_projections"]] <- CreateDimReducObject(
+    embeddings = embeddings_mat,
+    key = "pcaproj_",
+    assay = DefaultAssay(human)
+  )
+
+  # Add per-PC embeddings as metadata columns named pcaproj_1, pcaproj_2, ...
+  proj_embeddings <- human@reductions$pca_projections@cell.embeddings
+  pc_colnames <- colnames(proj_embeddings)
+  human <- AddMetaData(human, proj_embeddings, col.name = pc_colnames)
+
+  # 7. Build response variable from `phenotype` (AD = 1, C = 0)
+  human@meta.data$dv <- as.integer(human@meta.data$phenotype == "AD")
+
+  # 8. Variance explained by mouse PCs — keep PCs whose cum_var is strictly below
+  #    the threshold (matches original sparsity-analysis methodology).
+  stdev <- combined@reductions$pca@stdev
+  variance <- stdev^2 / sum(stdev^2)
+  cum_var <- cumsum(variance)
+  PCs <- max(1, sum(cum_var < variance_threshold))
+
+  # 9. Train/test split, GLM with stepAIC, AUC on held-out
+  set.seed(seed)
+  pc_keep   <- pc_colnames[seq_len(PCs)]
+  model_df  <- human@meta.data[, c(pc_keep, "dv"), drop = FALSE]
+  model_df  <- model_df[complete.cases(model_df), , drop = FALSE]
+
+  train_idx <- sample(c(TRUE, FALSE), nrow(model_df),
+                      replace = TRUE, prob = c(0.8, 0.2))
+  train_df  <- model_df[train_idx, , drop = FALSE]
+  test_df   <- model_df[!train_idx, , drop = FALSE]
+
+  ad.model     <- glm(dv ~ ., data = train_df, family = binomial)
+  final_model  <- MASS::stepAIC(ad.model, direction = "both", trace = FALSE)
+
+  predictions  <- predict(final_model, newdata = test_df, type = "response")
+  roc_obj      <- pROC::roc(test_df$dv, predictions, quiet = TRUE)
+
+  list(auc = as.numeric(roc_obj$auc),
+       aic = final_model$aic,
+       n_pcs = PCs)
+}
+```
+
+
+
+## Run for GSE175814
+
+```{r}
+features <- seq(250, 15250, 250)
+auc_vec_175814 <- list()
+aic_vec_175814 <- list()
+
+human_gse175814 <- readRDS(paste0(home_dir, "/sc_human_objects/gse175814_microglia_final.RData"))
+
+for (i in features) {
+  message("[GSE175814] features = ", i)
+
+  # Re-derive PCA on the merged mouse object at this nfeatures setting
+  combined <- combined_base
+  combined <- FindVariableFeatures(combined, selection.method = "vst", nfeatures = i, verbose = FALSE)
+  all.genes <- rownames(combined)
+  combined <- ScaleData(combined, features = all.genes, verbose = FALSE)
+  combined <- RunPCA(combined,
+                     features = VariableFeatures(object = combined),
+                     verbose = FALSE)
+
+  res <- project_and_score(human = human_gse175814,
+                           combined = combined,
+                           ortholog_df = ortholog_df)
+
+  auc_vec_175814[[as.character(i)]] <- res$auc
+  aic_vec_175814[[as.character(i)]] <- res$aic
+
+  saveRDS(auc_vec_175814, file.path(out_dir, "auc_pca_gse175814.RData"))
+  saveRDS(aic_vec_175814, file.path(out_dir, "aic_pca_gse175814.RData"))
+}
+
+rm(human_gse175814)
+```
+
+
+
+
+## Run for GSE147528
+
+```{r}
+features <- seq(250, 15250, 250)
+auc_vec_147528 <- list()
+aic_vec_147528 <- list()
+
+human_gse147528 <- readRDS(paste0(home_dir, "/sc_human_objects/gse147528_microglia_final.RData"))
+
+for (i in features) {
+  message("[GSE147528] features = ", i)
+
+  combined <- combined_base
+  combined <- FindVariableFeatures(combined, selection.method = "vst", nfeatures = i)
+  all.genes <- rownames(combined)
+  combined <- ScaleData(combined, features = all.genes)
+  combined <- RunPCA(combined,
+                     features = VariableFeatures(object = combined),
+                     verbose = FALSE)
+
+  res <- project_and_score(human = human_gse147528,
+                           combined = combined,
+                           ortholog_df = ortholog_df)
+
+  auc_vec_147528[[as.character(i)]] <- res$auc
+  aic_vec_147528[[as.character(i)]] <- res$aic
+
+  saveRDS(auc_vec_147528, file.path(out_dir, "auc_pca_gse147528.RData"))
+  saveRDS(aic_vec_147528, file.path(out_dir, "aic_pca_gse147528.RData"))
+}
+
+rm(human_gse147528)
+```
+
+
+
+## Combined plots: GSE175814 vs GSE147528
+
+```{r}
+# Build a combined tidy data frame
+plot_df_combined <- rbind(
+  data.frame(
+    features = as.numeric(names(auc_vec_175814)),
+    AUC      = unlist(auc_vec_175814, use.names = FALSE),
+    AIC      = unlist(aic_vec_175814, use.names = FALSE),
+    Dataset  = "GSE175814"
+  ),
+  data.frame(
+    features = as.numeric(names(auc_vec_147528)),
+    AUC      = unlist(auc_vec_147528, use.names = FALSE),
+    AIC      = unlist(aic_vec_147528, use.names = FALSE),
+    Dataset  = "GSE147528"
+  )
+)
+plot_df_combined <- plot_df_combined[order(plot_df_combined$Dataset,
+                                           plot_df_combined$features), ]
+
+# AIC: both datasets on one plot
+p_aic_combined <- ggplot(plot_df_combined,
+                         aes(x = features, y = AIC, color = Dataset)) +
+  geom_line() +
+  geom_point(size = 1.5) +
+  labs(x = "nfeatures", y = "AIC",
+       title = "PCA sparsity exploration — AIC",
+       color = "Human dataset") +
+  theme_classic()
+
+# AUC: both datasets on one plot
+p_auc_combined <- ggplot(plot_df_combined,
+                         aes(x = features, y = AUC, color = Dataset)) +
+  geom_line() +
+  geom_point(size = 1.5) +
+  labs(x = "nfeatures", y = "AUC",
+       title = "PCA sparsity exploration — AUC",
+       color = "Human dataset") +
+  theme_classic()
+
+# Save PDFs alongside the per-dataset outputs
+ggsave(file.path(out_dir, "aic_pca_combined.pdf"),
+       plot = p_aic_combined, width = 7.5, height = 5)
+ggsave(file.path(out_dir, "auc_pca_combined.pdf"),
+       plot = p_auc_combined, width = 7.5, height = 5)
+
+# Print to notebook
+p_aic_combined
+p_auc_combined
+```
+
+## Sparse PCA sparsity exploration
+
+```{r}
+# Output directory for AIC/AUC results
+out_dir <- "C:/Users/Alexander/OneDrive/Desktop/sparsity_analysis_results"
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+# Read ortholog matrix (15102 1:1 mouse<->human orthologs across 6 datasets)
+# Column "X" (unnamed in CSV) = HUMAN gene symbols (rownames from convert_orthologs)
+# Column "input_gene"          = MOUSE gene symbols (input to convert_orthologs)
+ortholog_df <- read.csv(paste0(home_dir, "/ortholog_matrix_IMPORTANT_6datasets.csv"),
+                        stringsAsFactors = FALSE)
+ortholog_df <- ortholog_df[, c("X", "input_gene")]
+colnames(ortholog_df) <- c("human_gene", "mouse_gene")
+
+# Build merged mouse object once — already-filtered microglia objects per project memory.
+# Normalization is independent of nfeatures, so do it here.
+mouse_gse208863 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse208683_microglia_final.RData"))
+mouse_gse140510 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse140510_microglia_final.RData"))
+merged <- merge(mouse_gse208863, mouse_gse140510,
+                add.cell.ids = c("gse208863", "gse140510"),
+                project = "merged")
+combined_base <- JoinLayers(merged)
+DefaultAssay(combined_base) <- "RNA"
+combined_base <- NormalizeData(combined_base)
+rm(mouse_gse208863, mouse_gse140510, merged)
+
+# Sanity checks — run after combined_base exists
+head(ortholog_df, 5)
+cat("ortholog_df rows:", nrow(ortholog_df), "\n")
+```
+
+## Helper Functions
+
+```{r}
+prepare_human <- function(human, ortholog_df) {
+  DefaultAssay(human) <- "RNA"
+  human <- NormalizeData(human, verbose = FALSE)
+  human <- ScaleData(human, features = rownames(human), verbose = FALSE)
+  human_gex_matrix <- LayerData(human, assay = "RNA", layer = "scale.data")
+
+  ortho_human_subset <- ortholog_df[ortholog_df$human_gene %in% rownames(human_gex_matrix), ]
+
+  dv <- as.integer(human@meta.data$phenotype == "AD")
+  names(dv) <- rownames(human@meta.data)
+
+  list(
+    gex_matrix = human_gex_matrix,
+    ortho      = ortho_human_subset,
+    dv         = dv,
+    cell_ids   = colnames(human_gex_matrix)
+  )
+}
+
+make_split <- function(n_cells, seed = 428) {
+  set.seed(seed)
+  sample(c(TRUE, FALSE), n_cells, replace = TRUE, prob = c(0.8, 0.2))
+}
+
+fit_mouse_spca <- function(combined_base, nfeatures, keepX, ncomp = 35) {
+
+  effective_keepX <- min(keepX, nfeatures)
+
+  combined <- combined_base
+  combined <- FindVariableFeatures(combined, selection.method = "vst",
+                                   nfeatures = nfeatures, verbose = FALSE)
+  vf <- VariableFeatures(combined)
+
+  # Scale ONLY variable features — saves time vs scaling all genes
+  combined <- ScaleData(combined, features = vf, verbose = FALSE)
+
+  scaled <- LayerData(combined, assay = "RNA", layer = "scale.data")[vf, , drop = FALSE]
+
+  bad_rows <- !is.finite(rowSums(scaled))
+  if (any(bad_rows)) {
+    message("    dropping ", sum(bad_rows), " features with non-finite values")
+    scaled <- scaled[!bad_rows, , drop = FALSE]
+  }
+
+  mouse_mat <- t(scaled)
+  if (!is.matrix(mouse_mat)) mouse_mat <- as.matrix(mouse_mat)
+  effective_keepX <- min(effective_keepX, ncol(mouse_mat))
+
+  mouse_embeddings <- tryCatch(
+    mixOmics::spca(mouse_mat, ncomp = ncomp,
+                   center = FALSE, scale = FALSE,
+                   keepX = rep(effective_keepX, ncomp)),
+    error = function(e) {
+      message("    spca failed at ncomp=", ncomp, ": ", conditionMessage(e))
+      message("    retrying with ncomp = 25")
+      mixOmics::spca(mouse_mat, ncomp = 25,
+                     center = FALSE, scale = FALSE,
+                     keepX = rep(effective_keepX, 25))
+    }
+  )
+
+  combined[["spca"]] <- CreateDimReducObject(
+    embeddings = mouse_embeddings$x,
+    loadings   = mouse_embeddings$rotation,
+    key        = "spca_",
+    assay      = DefaultAssay(combined)
+  )
+
+  combined
+}
+
+project_and_score_spca <- function(human_pre, combined, train_idx) {
+
+  loadings <- combined@reductions$spca@feature.loadings
+
+  ortho <- human_pre$ortho[human_pre$ortho$mouse_gene %in% rownames(loadings), ]
+
+  loadings_sub <- loadings[ortho$mouse_gene, , drop = FALSE]
+  gex_sub      <- human_pre$gex_matrix[ortho$human_gene, , drop = FALSE]
+
+  stopifnot(nrow(loadings_sub) == nrow(gex_sub))
+
+  embeddings_mat <- crossprod(gex_sub, loadings_sub)
+
+  pc_names <- paste0("spcaproj_", seq_len(ncol(embeddings_mat)))
+  colnames(embeddings_mat) <- pc_names
+
+  model_df <- data.frame(as.matrix(embeddings_mat),
+                         dv = human_pre$dv[rownames(embeddings_mat)],
+                         check.names = FALSE)
+  model_df <- model_df[complete.cases(model_df), , drop = FALSE]
+
+  train_df <- model_df[train_idx, , drop = FALSE]
+  test_df  <- model_df[!train_idx, , drop = FALSE]
+
+  ad.model    <- glm(dv ~ ., data = train_df, family = binomial)
+  final_model <- MASS::stepAIC(ad.model, direction = "both", trace = FALSE)
+
+  predictions <- predict(final_model, newdata = test_df, type = "response")
+  roc_obj     <- pROC::roc(test_df$dv, predictions, quiet = TRUE)
+
+  list(auc = as.numeric(roc_obj$auc),
+       aic = final_model$aic,
+       n_pcs = ncol(embeddings_mat))
+}
+```
+
+## Run for GSE175814
+
+```{r}
+features   <- seq(750, 15250, 250)
+keepX_vals <- c(100, 200, 500)
+
+human_gse175814  <- readRDS(paste0(home_dir, "/sc_human_objects/gse175814_microglia_final.RData"))
+human_pre_175814 <- prepare_human(human_gse175814, ortholog_df)
+train_idx_175814 <- make_split(ncol(human_pre_175814$gex_matrix))
+rm(human_gse175814)
+
+for (kx in keepX_vals) {
+  message("[GSE175814] keepX = ", kx)
+  auc_vec <- list()
+  aic_vec <- list()
+
+  for (i in features) {
+    message("  features = ", i)
+
+    combined <- fit_mouse_spca(combined_base, nfeatures = i, keepX = kx, ncomp = 35)
+    res <- project_and_score_spca(human_pre_175814, combined, train_idx_175814)
+
+    auc_vec[[as.character(i)]] <- res$auc
+    aic_vec[[as.character(i)]] <- res$aic
+
+    saveRDS(auc_vec, file.path(out_dir,
+            paste0("auc_spca_keepX", kx, "_gse175814.RData")))
+    saveRDS(aic_vec, file.path(out_dir,
+            paste0("aic_spca_keepX", kx, "_gse175814.RData")))
+  }
+}
+
+rm(human_pre_175814)
+```
+
+## Run for GSE147528
+
+
+## Combined sPCA plots: GSE175814 vs GSE147528 across keepX values
+
+```{r}
+keepX_vals <- c(100, 200, 500)
+
+# Helper: load a saved list and convert to long-format rows
+load_run <- function(metric, kx, dataset) {
+  path <- file.path(out_dir,
+                    paste0(metric, "_spca_keepX", kx, "_", dataset, ".RData"))
+  if (!file.exists(path)) return(NULL)
+  vals <- readRDS(path)
+  data.frame(
+    features = as.numeric(names(vals)),
+    value    = unlist(vals, use.names = FALSE),
+    keepX    = kx,
+    Dataset  = toupper(dataset),
+    metric   = metric
+  )
+}
+
+# Load every (metric, keepX, dataset) combination and stack
+plot_df_spca <- do.call(rbind, c(
+  lapply(keepX_vals, function(kx) load_run("auc", kx, "gse175814")),
+  lapply(keepX_vals, function(kx) load_run("auc", kx, "gse147528")),
+  lapply(keepX_vals, function(kx) load_run("aic", kx, "gse175814")),
+  lapply(keepX_vals, function(kx) load_run("aic", kx, "gse147528"))
+))
+
+# keepX as a factor with ordered levels for clean legend ordering
+plot_df_spca$keepX <- factor(plot_df_spca$keepX, levels = keepX_vals)
+
+# Split for separate AIC and AUC plots
+df_aic <- subset(plot_df_spca, metric == "aic")
+df_auc <- subset(plot_df_spca, metric == "auc")
+
+# AIC: faceted by Dataset, lines colored by keepX
+p_aic_spca <- ggplot(df_aic,
+                     aes(x = features, y = value, color = keepX)) +
+  geom_line() +
+  geom_point(size = 1.2) +
+  facet_wrap(~ Dataset, scales = "free_y") +
+  labs(x = "nfeatures", y = "AIC",
+       title = "sPCA sparsity exploration — AIC",
+       color = "keepX") +
+  theme_classic()
+
+# AUC: faceted by Dataset, lines colored by keepX
+p_auc_spca <- ggplot(df_auc,
+                     aes(x = features, y = value, color = keepX)) +
+  geom_line() +
+  geom_point(size = 1.2) +
+  facet_wrap(~ Dataset) +
+  labs(x = "nfeatures", y = "AUC",
+       title = "sPCA sparsity exploration — AUC",
+       color = "keepX") +
+  theme_classic()
+
+# Save PDFs
+ggsave(file.path(out_dir, "aic_spca_combined.pdf"),
+       plot = p_aic_spca, width = 11, height = 5)
+ggsave(file.path(out_dir, "auc_spca_combined.pdf"),
+       plot = p_auc_spca, width = 11, height = 5)
+
+# Print to notebook
+p_aic_spca
+p_auc_spca
+```
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
+

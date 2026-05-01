@@ -1,0 +1,137 @@
+---
+title: "Ortholog Finder - Six Datasets"
+author: "Alexander Bergendorf"
+date: "2023-08-04"
+output: html_document
+---
+
+# Library Import
+```{r}
+library(Seurat)
+library(orthogene)
+library(tidyverse)
+
+#home_dir <- "C:/Users/aberg/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+home_dir <- "C:/Users/Alexander/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+```
+
+# Data Import
+
+```{r}
+# Human 1 (GSE175814)
+data <- Read10X(paste0(home_dir, "/AD_human_raw_gse175814/A1"))
+human_gse175814_genes <- rownames(data)
+
+# Human 2 (GSE157827)
+data <- Read10X(paste0(home_dir, "/AD_human_raw_gse157827/GSM4775561"))
+human_gse157827_genes <- rownames(data)
+
+# Human 3 (GSE147528) - HDF5 format
+data <- Read10X_h5(paste0(home_dir, "/AD_human_raw_gse147528/GSM4432645_EC2_raw_gene_bc_matrices_h5.h5"))
+human_gse147528_genes <- rownames(data)
+
+# Human 4 (GSE174367) - HDF5 format
+data <- Read10X_h5(paste0(home_dir, "/AD_human_raw_gse174367/GSE174367_snRNA-seq_filtered_feature_bc_matrix.h5"))
+human_gse174367_genes <- rownames(data)
+
+# Mouse 1 (GSE208683)
+counts <- read.table(
+  file = paste0(home_dir, "/AD_mouse_raw_gse208683/GSE208683_Allcell_6m_UMI_matrix.txt"),
+  sep = "\t",
+  colClasses = c(rep("character", 1), rep("integer", 15013), rep("NULL", 46936))
+)
+mouse_gse208683_genes <- rownames(counts)
+
+# Mouse 2 (GSE140510)
+data <- Read10X(paste0(home_dir, "/AD_mouse_raw_gse140510/GSM4173504"))
+mouse_gse140510_genes <- rownames(data)
+
+# Clean up
+rm(data, counts)
+```
+
+# Step 2: Intersect within each species
+
+```{r}
+# Genes present in ALL FOUR human datasets
+common_human_genes <- Reduce(intersect, list(
+  human_gse175814_genes,
+  human_gse157827_genes,
+  human_gse147528_genes,
+  human_gse174367_genes
+))
+length(common_human_genes)
+
+# Genes present in BOTH mouse datasets
+common_mouse_genes <- intersect(mouse_gse208683_genes, mouse_gse140510_genes)
+length(common_mouse_genes)
+```
+
+# Step 3: Convert orthologs in both directions (using common genes only)
+```{r}
+# Mouse common genes -> human orthologs
+adjusted_mouse <- convert_orthologs(gene_df = common_mouse_genes,
+                                    input_species = "mouse",
+                                    output_species = "human",
+                                    non121_strategy = "drop_both_species")
+
+# Human common genes -> mouse orthologs
+adjusted_human <- convert_orthologs(gene_df = common_human_genes,
+                                    input_species = "human",
+                                    output_species = "mouse",
+                                    non121_strategy = "drop_both_species")
+```
+
+# Step 4: Cross-species filtering (same logic as before)
+
+```{r}
+# Filter mouse orthologs to only those whose human counterpart is in adjusted_human
+length(row.names(adjusted_mouse))
+adjusted_mouse <- adjusted_mouse %>%
+  filter(row.names(adjusted_mouse) %in% adjusted_human$input_gene)
+length(row.names(adjusted_mouse))
+
+# Filter human orthologs to only those whose mouse counterpart is in adjusted_mouse
+length(row.names(adjusted_human))
+adjusted_human <- adjusted_human %>%
+  filter(row.names(adjusted_human) %in% adjusted_mouse$input_gene)
+length(row.names(adjusted_human))
+
+# One more pass on mouse to ensure perfect symmetry
+length(row.names(adjusted_mouse))
+adjusted_mouse <- adjusted_mouse %>%
+  filter(row.names(adjusted_mouse) %in% adjusted_human$input_gene)
+length(row.names(adjusted_mouse))
+```
+
+15102 shared genes
+
+
+
+# Step 5: Save ortholog lists
+```{r}
+mouse_orthologs <- adjusted_mouse$input_gene
+saveRDS(mouse_orthologs, file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_orthologs_6datasets.RData"))
+
+human_orthologs <- adjusted_human$input_gene
+saveRDS(human_orthologs, file = paste0(home_dir, "/AD_human_objects_ortholog/human_orthologs_6datasets.RData"))
+```
+
+# Step 6: Save ortholog mapping matrix
+
+```{r}
+mouse_orthologs <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_orthologs_6datasets.RData"))
+
+adjusted_orthologs <- convert_orthologs(gene_df = mouse_orthologs,
+                                        input_species = "mouse",
+                                        output_species = "human",
+                                        non121_strategy = "drop_both_species")
+
+write.csv(adjusted_orthologs, file = paste0(home_dir, "/ortholog_matrix_IMPORTANT_6datasets.csv"))
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```

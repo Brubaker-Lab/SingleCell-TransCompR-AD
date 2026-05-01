@@ -1,0 +1,173 @@
+---
+title: "AD Microglia Processing GSE147528"
+author: "Alexander Bergendorf"
+date: "2026-04-07"
+output: html_document
+---
+
+
+# Library Import
+
+```{r}
+library(Seurat)
+#library(mixOmics)
+library(tidyverse)
+#library(orthogene)
+library(dittoSeq)
+library(openxlsx)
+#library(PCAtools)
+library(MASS)
+library(glmnet)
+library(pROC)
+
+home_dir <- "/mnt/vstor/SOM_PATH_DKB50/members/axb1812/AD_Project_Microglia"
+
+```
+
+
+## Loading Mouse Data
+
+```{r}
+combined <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse147528_final_filtered.RData"))
+
+combined <- subset(combined, subset = summary == "Microglia")
+```
+
+
+```{r}
+table(combined@meta.data$orig.ident)
+```
+
+
+
+
+## Run PCA to isolate human Microglia
+
+```{r}
+DefaultAssay(combined) <- "RNA"
+combined <- NormalizeData(combined)
+combined <- FindVariableFeatures(combined, selection.method = "vst", nfeatures = 3000)
+all.genes <- rownames(combined)
+combined <- ScaleData(combined, features = all.genes)
+combined <- RunPCA(combined, features = VariableFeatures(object = combined))
+```
+
+
+
+A lot of these principal components are separated by only a few cells... I think we need to cluster the cells again to get a better representation 
+
+```{r}
+combined <- FindNeighbors(combined, graph.name = "test", dims = 1:5)
+combined <- FindClusters(combined, graph.name = "test", resolution = 0.5)
+combined <- RunUMAP(combined, graph.name = "test", dims = 1:5)
+```
+
+
+
+```{r}
+table(combined@meta.data$orig.ident)
+```
+
+
+
+```{r}
+p1 <- dittoDimPlot(combined, var = "phenotype", reduction = "umap")
+ggsave(filename= paste0(home_dir, "/figures/gse147528/microglia_gse147528_umap_microglia_.png"), width = 9, height = 7) # name the file as an EPS
+
+p1 <- dittoDimPlot(combined, "seurat_clusters", do.label = TRUE, legend.show = FALSE, labels.size = 3) 
+ggsave(filename= paste0(home_dir, "/figures/gse147528/microglia_gse147528_umap_init.png"), width = 9, height = 7) # name the file as an EPS
+
+```
+
+
+```{r}
+# Visualization of some markers
+marker_list <- c("GAD1", "NRGN",
+             "ANLN", 
+             "VCAN", 
+             "CABLES1", "AQP4", 
+             "VWF", "FLT1",
+             "CSF1R")
+
+# Dot plot of all markers across clusters
+p2 <- DotPlot(combined, features = marker_list, assay = "RNA") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_discrete(limits = rev)
+ggsave(filename = paste0(home_dir, "/figures/gse147528/microglia_dotplot_markers.png"),
+       plot = p2, width = 9, height = 7)
+```
+
+```{r}
+markers <- c("TMEM119", "AIF1", "CX3CR1", "P2RY12", "HEXB", "CSF1R")
+
+for(i in markers){
+  p1 <- dittoDimPlot(combined, i, do.label = TRUE, legend.show = FALSE, labels.size = 3) 
+  ggsave(filename= paste0(home_dir, "/figures/gse147528/microglia_umap", i, ".png"), width = 9, height = 7) # name the file as an EPS
+}
+```
+```{r}
+# Get unique identifiers
+unique_idents <- as.character(unique(combined@meta.data$seurat_clusters))
+unique_idents
+
+# Initialize an empty list to store the results
+markers_list <- list()
+
+# Loop over each identifier and run FindMarkers
+for (id in unique_idents) {
+  markers_list[[id]] <- FindMarkers(
+    object = combined,
+    ident.1 = id,
+    only.pos = TRUE,
+    assay = "RNA",
+    max.cells.per.ident = 300
+  )
+}
+
+saveRDS(markers_list, paste0(home_dir, "/results/microglia_markers_human_ortholog_gse174367.RData"))
+```
+
+```{r}
+markers_list$`4`
+```
+
+
+
+```{r}
+# Cluster 5 and 6 are all non-microglial cels
+combined <- subset(combined, subset = seurat_clusters %in% c(5, 6), invert = TRUE)
+```
+
+
+
+```{r}
+# Save barcodes of good microglial cells for future use
+good_microglia <- Cells(combined)
+saveRDS(good_microglia, file = paste0(home_dir, "/sc_human_objects/gse147528_good_microglia_barcodes.RData"))
+```
+
+
+```{r}
+saveRDS(combined,  paste0(home_dir, "/sc_human_objects/gse147528_microglia_final.RData"))
+```
+
+```{r}
+combined <- readRDS(paste0(home_dir, "/sc_human_objects/gse147528_microglia_final.RData"))
+```
+
+```{r}
+table(combined@meta.data$orig.ident)
+combined
+```
+
+=
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
+
+
+
+

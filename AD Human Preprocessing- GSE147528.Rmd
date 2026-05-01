@@ -1,0 +1,106 @@
+---
+title: "AD Human Processing - GSE157827"
+author: "Alexander Bergendorf"
+date: "2026-03-18"
+output: html_document
+---
+
+# Library Import
+```{r}
+library(Seurat) 
+library(tidyverse) 
+library(patchwork) 
+library(dittoSeq) 
+library(stringr)
+library(gprofiler2)
+library(harmony)
+library(patchwork)
+library(cowplot)
+library(openxlsx)
+library(MAST)
+library(rhdf5)
+library(DropletUtils)
+
+#home_dir <- "C:/Users/aberg/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+home_dir <- "C:/Users/Alexander/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+```
+
+
+# Data Import
+
+```{r}
+library(Seurat)
+
+# Directory containing the h5 files
+data_dir <- file.path(home_dir, "AD_human_raw_gse147528")
+
+# Find all H5 files in that directory
+h5_files <- list.files(data_dir, pattern = "\\.h5$", full.names = TRUE)
+
+# Read each H5 file into a Seurat-friendly sparse matrix
+counts_list <- lapply(h5_files, Read10X_h5)
+
+# Optionally, create a list of Seurat objects (one per file)
+seurat_list <- lapply(seq_along(counts_list), function(i) {
+  CreateSeuratObject(counts = counts_list[[i]],
+                     project = tools::file_path_sans_ext(basename(h5_files[[i]])))
+})
+
+# Now seurat_list contains individual Seurat objects for further processing
+```
+
+
+```{r}
+for (i in seq_along(seurat_list)) {
+  orig_id <- unique(seurat_list[[i]]$orig.ident)[1]
+  names(seurat_list)[i] <- sub("^GSM[0-9]+_([^_]+)_.*$", "\\1", orig_id)
+}
+```
+
+
+
+```{r}
+control <- c("EC2", "EC1", "EC3")
+ad <- c("EC4", "EC6", "EC7", "EC5", "EC9", "EC8", "EC10")
+```
+
+
+
+```{r}
+for (nm in names(seurat_list)) {
+  seurat_list[[nm]]$phenotype <- ifelse(nm %in% control, "C",
+                                ifelse(nm %in% ad, "AD", NA))
+}
+```
+
+
+```{r}
+seurat_list <- lapply(names(seurat_list), function(nm) {
+  message("Processing ", nm)
+  obj <- seurat_list[[nm]]
+  raw_counts <- GetAssayData(obj, assay = "RNA", layer = "counts")
+  
+  e.out <- emptyDrops(raw_counts, lower = 100)
+  is.cell <- e.out$FDR <= 0.001
+  is.cell[is.na(is.cell)] <- FALSE
+  
+  message("  ", sum(is.cell), " cells retained out of ", ncol(raw_counts))
+  
+  filtered_counts <- raw_counts[, is.cell]
+  CreateSeuratObject(counts = filtered_counts, project = nm)
+})
+names(seurat_list) <- names(seurat_list)  # preserve names
+```
+
+
+```{r}
+saveRDS(seurat_list, paste0(home_dir, "/AD_human_raw_gse147528/gse147528_object.RData"))
+```
+
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,781 @@
+---
+title: "AD Project DE"
+author: "Alexander Bergendorf"
+date: "2023-08-17"
+output: html_document
+---
+
+# Library Import
+```{r}
+library(Seurat)
+library(mixOmics)
+library(tidyverse)
+library(orthogene)
+library(dittoSeq)
+library(openxlsx)
+library(RColorBrewer)
+library(pheatmap)
+library(scales)
+library(VennDiagram)
+library(grid)
+
+#home_dir <- "C:/Users/aberg/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+home_dir <- "C:/Users/Alexander/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+```
+
+# Mouse DE
+## AD (GSE208683)
+
+```{r}
+mouse_gse208683 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse208683_microglia_final.RData"))
+```
+
+
+
+
+```{r}
+
+Idents(mouse_gse208683) <- mouse_gse208683@meta.data$phenotype
+
+de <- FindMarkers(mouse_gse208683, ident.1 = "AD", 
+                  only.pos = TRUE, assay = "RNA") 
+ 
+
+# Save data
+write.xlsx(de, file = paste0(home_dir, "/mouse_gse208683_AD_markers_microglia.xlsx"), rowNames = TRUE) 
+```
+
+```{r}
+de %>%
+  filter(p_val_adj < 0.05)
+```
+
+864 cells
+
+73 differentially expressed genes
+
+
+## AD (GSE140510)
+
+```{r}
+mouse_gse140510 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse140510_microglia_final.RData"))
+```
+
+
+```{r}
+
+Idents(mouse_gse140510) <- mouse_gse140510@meta.data$phenotype
+
+de <- FindMarkers(mouse_gse140510, ident.1 = "AD", 
+                  only.pos = TRUE, assay = "RNA") 
+ 
+
+# Save data
+write.xlsx(de, file = paste0(home_dir, "/mouse_gse140510_AD_markers_microglia.xlsx"), rowNames = TRUE) 
+```
+
+```{r}
+de %>%
+  filter(p_val_adj < 0.05)
+```
+
+2123 cells
+
+193 differentially expressed genes
+
+
+## C (GSE208683)
+
+```{r}
+mouse_gse208683 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse208683_microglia_final.RData"))
+```
+
+
+
+
+```{r}
+
+Idents(mouse_gse208683) <- mouse_gse208683@meta.data$phenotype
+
+de <- FindMarkers(mouse_gse208683, ident.1 = "C", 
+                  only.pos = TRUE, assay = "RNA") 
+ 
+
+# Save data
+write.xlsx(de, file = paste0(home_dir, "/mouse_gse208683_C_markers_microglia.xlsx"), rowNames = TRUE) 
+```
+
+```{r}
+de %>%
+  filter(p_val_adj < 0.05)
+```
+
+864 cells
+
+
+## C (GSE140510)
+
+```{r}
+mouse_gse140510 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse140510_microglia_final.RData"))
+```
+
+
+```{r}
+
+Idents(mouse_gse140510) <- mouse_gse140510@meta.data$phenotype
+
+de <- FindMarkers(mouse_gse140510, ident.1 = "C", 
+                  only.pos = TRUE, assay = "RNA") 
+ 
+
+# Save data
+write.xlsx(de, file = paste0(home_dir, "/mouse_gse140510_C_markers_microglia.xlsx"), rowNames = TRUE) 
+```
+
+```{r}
+de %>%
+  filter(p_val_adj < 0.05)
+```
+
+2123 cells
+
+## Plotting DEGs
+### Finding overlapping DEGs
+
+```{r}
+# ------- Helper: find overlapping genes ranked highest in BOTH studies -------
+# Each file is already sorted by FindMarkers (p_val ascending), so row index = rank.
+# For overlapping genes, sum the two ranks; smallest combined rank = top priority.
+top_overlap <- function(df1, df2, n = 15, p_thresh = 0.05) {
+  df1 <- df1 %>% filter(p_val_adj < p_thresh)
+  df2 <- df2 %>% filter(p_val_adj < p_thresh)
+
+  df1$rank1 <- seq_len(nrow(df1))
+  df2$rank2 <- seq_len(nrow(df2))
+
+  merged <- inner_join(df1[, c("genes", "rank1")],
+                       df2[, c("genes", "rank2")],
+                       by = "genes")
+
+  merged$combined_rank <- merged$rank1 + merged$rank2
+  merged <- merged %>% arrange(combined_rank)
+
+  head(merged$genes, n)
+}
+
+# ------- Load per-study mouse DE results -------
+# GSE208683 AD markers
+sheets <- openxlsx::getSheetNames(paste0(home_dir, "/mouse_gse208683_AD_markers_microglia.xlsx"))
+mouse_208683_ad <- lapply(sheets, openxlsx::read.xlsx,
+                          xlsxFile = paste0(home_dir, "/mouse_gse208683_AD_markers_microglia.xlsx"))[[1]]
+colnames(mouse_208683_ad) <- c("genes", "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")
+
+# GSE140510 AD markers
+sheets <- openxlsx::getSheetNames(paste0(home_dir, "/mouse_gse140510_AD_markers_microglia.xlsx"))
+mouse_140510_ad <- lapply(sheets, openxlsx::read.xlsx,
+                          xlsxFile = paste0(home_dir, "/mouse_gse140510_AD_markers_microglia.xlsx"))[[1]]
+colnames(mouse_140510_ad) <- c("genes", "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")
+
+# GSE208683 C markers
+sheets <- openxlsx::getSheetNames(paste0(home_dir, "/mouse_gse208683_C_markers_microglia.xlsx"))
+mouse_208683_c <- lapply(sheets, openxlsx::read.xlsx,
+                         xlsxFile = paste0(home_dir, "/mouse_gse208683_C_markers_microglia.xlsx"))[[1]]
+colnames(mouse_208683_c) <- c("genes", "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")
+
+# GSE140510 C markers
+sheets <- openxlsx::getSheetNames(paste0(home_dir, "/mouse_gse140510_C_markers_microglia.xlsx"))
+mouse_140510_c <- lapply(sheets, openxlsx::read.xlsx,
+                         xlsxFile = paste0(home_dir, "/mouse_gse140510_C_markers_microglia.xlsx"))[[1]]
+colnames(mouse_140510_c) <- c("genes", "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")
+
+
+
+# Top overlapping AD and C genes across the two mouse studies
+mouse_ad_top <- top_overlap(mouse_208683_ad, mouse_140510_ad, n = 15)
+mouse_c_top  <- top_overlap(mouse_208683_c,  mouse_140510_c,  n = 15)
+
+combined_genes <- c(mouse_ad_top, rev(mouse_c_top))
+
+```
+
+### Heatmap GSE208683
+
+```{r}
+mouse_gse208683 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse208683_microglia_final.RData"))
+mouse_gse208683 <- ScaleData(mouse_gse208683, features = rownames(mouse_gse208683), assay = "RNA")
+
+# Order cells: phenotype first, then orig.ident within phenotype
+cell_order <- mouse_gse208683@meta.data %>%
+  tibble::rownames_to_column("cell") %>%
+  arrange(phenotype, orig.ident) %>%
+  pull(cell)
+
+# dittoSeq default colors: orange = "#E69F00", blue = "#56B4E9"
+ditto_colors <- c("#E69F00", "#56B4E9")
+
+DoHeatmap(mouse_gse208683,
+          features = combined_genes,
+          cells = cell_order,
+          group.by = "phenotype",
+          group.colors = ditto_colors,
+          assay = "RNA",
+          label = FALSE,
+          disp.min = -1,
+          disp.max = 2,
+          raster = FALSE)
+
+ ggsave(filename = paste0(home_dir, "/figures/manuscript/heatmap_overlap_gse208683.pdf"),
+       width = 7, height = 5)
+```
+
+
+### Heatmap GSE140510
+
+```{r}
+mouse_gse140510 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse140510_microglia_final.RData"))
+mouse_gse140510 <- ScaleData(mouse_gse140510, features = rownames(mouse_gse140510), assay = "RNA")
+
+cell_order <- mouse_gse140510@meta.data %>%
+  tibble::rownames_to_column("cell") %>%
+  arrange(phenotype, orig.ident) %>%
+  pull(cell)
+
+# dittoSeq default colors: orange = "#E69F00", blue = "#56B4E9"
+ditto_colors <- c("#E69F00", "#56B4E9")
+
+DoHeatmap(mouse_gse140510,
+          features = combined_genes,
+          cells = cell_order,
+          group.by = "phenotype",
+          group.colors = ditto_colors,
+          assay = "RNA",
+          label = FALSE,
+          disp.min = -1,
+          disp.max = 2,
+          raster = FALSE)
+
+ ggsave(filename = paste0(home_dir, "/figures/manuscript/heatmap_overlap_gse140510.pdf"),
+        width = 7, height = 5)
+```
+
+
+### Heatmap Combined
+
+```{r}
+mouse_gse208863 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse208683_microglia_final.RData"))
+mouse_gse140510 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse140510_microglia_final.RData"))
+
+merged <- merge(mouse_gse208863, mouse_gse140510, add.cell.ids = c("gse208863", "gse140510"), project = "merged")
+
+# In Seurat v5, layers are split by default after merge. Join them so the assay is truly merged:
+merged <- JoinLayers(merged)
+
+merged@meta.data$study <- if_else(merged@meta.data$orig.ident %in% c("1_HS", "2_HS", "5_HS", "6_HS"), "GSE208683", "GSE140510")
+```
+
+```{r}
+
+cell_order <- merged@meta.data %>%
+  tibble::rownames_to_column("cell") %>%
+  arrange(phenotype, orig.ident) %>%
+  pull(cell)
+
+# dittoSeq default colors: orange = "#E69F00", blue = "#56B4E9"
+ditto_colors <- c("#E69F00", "#56B4E9")
+
+DoHeatmap(merged,
+          features = combined_genes,
+          cells = cell_order,
+          group.by = "phenotype",
+          group.colors = ditto_colors,
+          assay = "RNA",
+          label = FALSE,
+          disp.min = -1,
+          disp.max = 2,
+          raster = FALSE)
+
+ ggsave(filename = paste0(home_dir, "/figures/manuscript/heatmap_overlap_combined.png"),
+        width = 7, height = 5)
+```
+
+
+
+# Human DE
+## AD (GSE175814)
+
+```{r}
+human_gse175814 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse175814_microglia_final.RData"))
+```
+
+
+
+```{r}
+
+Idents(human_gse175814) <- human_gse175814@meta.data$phenotype
+
+de <- FindMarkers(human_gse175814, ident.1 = "AD", 
+                  only.pos = TRUE, assay = "RNA") 
+ 
+
+# Save data
+write.xlsx(de, file = paste0(home_dir, "/human_gse175814_AD_markers_microglia.xlsx"), rowNames = TRUE) 
+```
+
+
+```{r}
+de %>%
+  filter(p_val_adj < 0.05)
+```
+
+2380 cells
+
+2924 differentially expressed genes
+
+
+## AD (GSE147528)
+
+```{r}
+human_gse147528 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse147528_microglia_final.RData"))
+```
+
+
+```{r}
+
+Idents(human_gse147528) <- human_gse147528@meta.data$phenotype
+
+de <- FindMarkers(human_gse147528, ident.1 = "AD", 
+                  only.pos = TRUE, assay = "RNA") 
+ 
+
+# Save data
+write.xlsx(de, file = paste0(home_dir, "/human_gse147528_AD_markers_microglia.xlsx"), rowNames = TRUE) 
+```
+
+```{r}
+de %>%
+  filter(p_val_adj < 0.05)
+```
+
+2123 cells
+
+1263 differentially expressed genes
+
+
+## AD (GSE175814)
+
+```{r}
+human_gse175814 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse175814_microglia_final.RData"))
+```
+
+
+
+```{r}
+
+Idents(human_gse175814) <- human_gse175814@meta.data$phenotype
+
+de <- FindMarkers(human_gse175814, ident.1 = "C", 
+                  only.pos = TRUE, assay = "RNA") 
+ 
+
+# Save data
+write.xlsx(de, file = paste0(home_dir, "/human_gse175814_C_markers_microglia.xlsx"), rowNames = TRUE) 
+```
+
+
+```{r}
+de %>%
+  filter(p_val_adj < 0.05)
+```
+
+2380 cells
+
+864 differentially expressed genes
+
+
+## AD (GSE147528)
+
+```{r}
+human_gse147528 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse147528_microglia_final.RData"))
+```
+
+
+```{r}
+
+Idents(human_gse147528) <- human_gse147528@meta.data$phenotype
+
+de <- FindMarkers(human_gse147528, ident.1 = "C", 
+                  only.pos = TRUE, assay = "RNA") 
+ 
+
+# Save data
+write.xlsx(de, file = paste0(home_dir, "/human_gse147528_C_markers_microglia.xlsx"), rowNames = TRUE) 
+```
+
+```{r}
+de %>%
+  filter(p_val_adj < 0.05)
+```
+
+2123 cells
+
+1263 differentially expressed genes
+
+
+
+## Plotting DEGs
+### Finding overlapping DEGs
+
+```{r}
+# ------- Helper: find overlapping genes ranked highest in BOTH studies -------
+# Each file is already sorted by FindMarkers (p_val ascending), so row index = rank.
+# For overlapping genes, sum the two ranks; smallest combined rank = top priority.
+top_overlap <- function(df1, df2, n = 15, p_thresh = 0.05) {
+  df1 <- df1 %>% filter(p_val_adj < p_thresh)
+  df2 <- df2 %>% filter(p_val_adj < p_thresh)
+
+  df1$rank1 <- seq_len(nrow(df1))
+  df2$rank2 <- seq_len(nrow(df2))
+
+  merged <- inner_join(df1[, c("genes", "rank1")],
+                       df2[, c("genes", "rank2")],
+                       by = "genes")
+
+  merged$combined_rank <- merged$rank1 + merged$rank2
+  merged <- merged %>% arrange(combined_rank)
+
+  head(merged$genes, n)
+}
+
+# ------- Load per-study human DE results -------
+sheets <- openxlsx::getSheetNames(paste0(home_dir, "/human_gse175814_AD_markers_microglia.xlsx"))
+human_175814_ad <- lapply(sheets, openxlsx::read.xlsx,
+                          xlsxFile = paste0(home_dir, "/human_gse175814_AD_markers_microglia.xlsx"))[[1]]
+colnames(human_175814_ad) <- c("genes", "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")
+
+sheets <- openxlsx::getSheetNames(paste0(home_dir, "/human_gse147528_AD_markers_microglia.xlsx"))
+human_147528_ad <- lapply(sheets, openxlsx::read.xlsx,
+                          xlsxFile = paste0(home_dir, "/human_gse147528_AD_markers_microglia.xlsx"))[[1]]
+colnames(human_147528_ad) <- c("genes", "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")
+
+sheets <- openxlsx::getSheetNames(paste0(home_dir, "/human_gse175814_C_markers_microglia.xlsx"))
+human_175814_c <- lapply(sheets, openxlsx::read.xlsx,
+                         xlsxFile = paste0(home_dir, "/human_gse175814_C_markers_microglia.xlsx"))[[1]]
+colnames(human_175814_c) <- c("genes", "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")
+
+sheets <- openxlsx::getSheetNames(paste0(home_dir, "/human_gse147528_C_markers_microglia.xlsx"))
+human_147528_c <- lapply(sheets, openxlsx::read.xlsx,
+                         xlsxFile = paste0(home_dir, "/human_gse147528_C_markers_microglia.xlsx"))[[1]]
+colnames(human_147528_c) <- c("genes", "p_val", "avg_log2FC", "pct.1", "pct.2", "p_val_adj")
+
+
+# Uses the same top_overlap() defined in the mouse block
+human_ad_top <- top_overlap(human_175814_ad, human_147528_ad, n = 15)
+human_c_top  <- top_overlap(human_175814_c,  human_147528_c,  n = 15)
+
+combined_genes <- c(human_ad_top, rev(human_c_top))
+```
+
+### Heatmap GSE175814
+
+```{r}
+human_gse175814 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse175814_microglia_final.RData"))
+human_gse175814 <- ScaleData(human_gse175814, features = rownames(human_gse175814), assay = "RNA")
+
+cell_order <- human_gse175814@meta.data %>%
+  tibble::rownames_to_column("cell") %>%
+  arrange(phenotype, orig.ident) %>%
+  pull(cell)
+
+# dittoSeq default colors: orange = "#E69F00", blue = "#56B4E9"
+ditto_colors <- c("#E69F00", "#56B4E9")
+
+DoHeatmap(human_gse175814,
+          features = combined_genes,
+          cells = cell_order,
+          group.by = "phenotype",
+          group.colors = ditto_colors,
+          assay = "RNA",
+          label = FALSE,
+          disp.min = -1,
+          disp.max = 2,
+          raster = FALSE)
+
+ ggsave(filename = paste0(home_dir, "/figures/manuscript/heatmap_overlap_gse175814.pdf"),
+        width = 7, height = 5)
+```
+
+### Heatmap GSE147528
+
+```{r}
+human_gse147528 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse147528_microglia_final.RData"))
+human_gse147528 <- ScaleData(human_gse147528, features = rownames(human_gse147528), assay = "RNA")
+
+cell_order <- human_gse147528@meta.data %>%
+  tibble::rownames_to_column("cell") %>%
+  arrange(phenotype, orig.ident) %>%
+  pull(cell)
+
+# dittoSeq default colors: orange = "#E69F00", blue = "#56B4E9"
+ditto_colors <- c("#E69F00", "#56B4E9")
+
+DoHeatmap(human_gse147528,
+          features = combined_genes,
+          cells = cell_order,
+          group.by = "phenotype",
+          group.colors = ditto_colors,
+          assay = "RNA",
+          label = FALSE,
+          disp.min = -1,
+          disp.max = 2,
+          raster = FALSE)
+
+ ggsave(filename = paste0(home_dir, "/figures/manuscript/heatmap_overlap_gse147528.eps"),
+        width = 7, height = 5)
+```
+
+### Heatmap Combined
+
+```{r}
+human_gse175814 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse175814_microglia_final.RData"))
+human_gse147528 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse147528_microglia_final.RData"))
+
+merged <- merge(human_gse175814, human_gse147528, add.cell.ids = c("gse175814", "gse147528"), project = "merged")
+
+# In Seurat v5, layers are split by default after merge. Join them so the assay is truly merged:
+merged <- JoinLayers(merged)
+
+merged@meta.data$study <- if_else(merged@meta.data$orig.ident %in% c("C1", "C2", "AD1", "AD2"), "GSE175814", "GSE147528")
+
+```
+
+
+
+
+
+```{r}
+
+cell_order <- merged@meta.data %>%
+  tibble::rownames_to_column("cell") %>%
+  arrange(phenotype, orig.ident) %>%
+  pull(cell)
+
+# dittoSeq default colors: orange = "#E69F00", blue = "#56B4E9"
+ditto_colors <- c("#E69F00", "#56B4E9")
+
+DoHeatmap(merged,
+          features = combined_genes,
+          cells = cell_order,
+          group.by = "phenotype",
+          group.colors = ditto_colors,
+          assay = "RNA",
+          label = FALSE,
+          disp.min = -1,
+          disp.max = 2,
+          raster = FALSE)
+
+ ggsave(filename = paste0(home_dir, "/figures/manuscript/heatmap_overlap_combined_human.png"),
+        width = 7, height = 5)
+```
+
+# Comparing Mouse DE and Human DE
+
+## Comparing Differentially Expressed Genes (Mice)
+
+```{r}
+de_mouse_140510 <- read.xlsx(paste0(home_dir, "/mouse_gse140510_AD_markers_microglia.xlsx"), rowNames = TRUE)
+de_mouse_140510 <- de_mouse_140510 %>%
+  filter(p_val_adj < 0.05)
+de_mouse_140510
+```
+
+```{r}
+de_mouse_208683 <- read.xlsx(paste0(home_dir, "/mouse_gse208683_AD_markers_microglia.xlsx"), rowNames = TRUE)
+de_mouse_208683 <- de_mouse_208683 %>%
+  filter(p_val_adj < 0.05)
+de_mouse_208683
+```
+
+```{r}
+# Find overlapping row names
+overlapping_genes <- intersect(rownames(de_mouse_208683), rownames(de_mouse_140510))
+
+# Get the count
+length(overlapping_genes)
+```
+
+## Comparing Differentially Expressed Genes (Human)
+
+```{r}
+de_human_175814 <- read.xlsx(paste0(home_dir, "/human_gse175814_AD_markers_microglia.xlsx"), rowNames = TRUE)
+de_human_175814 <- de_human_175814 %>%
+  filter(p_val_adj < 0.05)
+de_human_175814
+```
+
+```{r}
+de_human_147528 <- read.xlsx(paste0(home_dir, "/human_gse147528_AD_markers_microglia.xlsx"), rowNames = TRUE)
+de_human_147528 <- de_human_147528 %>%
+  filter(p_val_adj < 0.05)
+de_human_147528
+```
+
+```{r}
+# Find overlapping row names
+overlapping_genes <- intersect(rownames(de_human_175814), rownames(de_human_147528))
+
+# Get the count
+length(overlapping_genes)
+```
+
+## Finding Similarities Across Species
+
+
+```{r}
+microglia_140510_mouse_ad <- row.names(de_mouse_140510)
+
+
+ortholog_mat_140510 <- convert_orthologs(gene_df = microglia_140510_mouse_ad,
+                                    input_species = "mouse",
+                                    output_species = "human",
+                                    non121_strategy = "drop_both_species")
+```
+
+```{r}
+microglia_208683_mouse_ad <- row.names(de_mouse_208683)
+
+
+ortholog_mat_208683 <- convert_orthologs(gene_df = microglia_208683_mouse_ad,
+                                    input_species = "mouse",
+                                    output_species = "human",
+                                    non121_strategy = "drop_both_species")
+```
+
+```{r}
+ortholog_mat_140510
+ortholog_mat_208683
+de_human_147528
+de_human_175814
+```
+
+```{r}
+# Reorder so GSE175814 and GSE147528 are on the left
+gene_sets <- list(
+  GSE175814 = rownames(de_human_175814),
+  GSE147528 = rownames(de_human_147528),
+  GSE140510 = rownames(ortholog_mat_140510),
+  GSE208683 = rownames(ortholog_mat_208683)
+)
+
+venn.plot <- venn.diagram(
+  x = gene_sets,
+  category.names = names(gene_sets),
+  filename = NULL,
+  output = TRUE,
+  
+  fill = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3"),
+  alpha = 0.5,
+  lwd = 2,
+  
+  cex = 1.2,
+  cat.cex = 1.3,
+  cat.fontface = "bold",
+  
+  main = "Shared Genes Across Studies",
+  main.cex = 1.5
+)
+
+grid.newpage()
+grid.draw(venn.plot)
+
+pdf(file = paste0(home_dir, "/figures/manuscript/overlapping_genes.pdf"), 
+    width = 7, height = 7)
+grid.draw(venn.plot)
+dev.off()
+
+```
+
+# 
+
+
+
+# Plotting Cell-type Abundances
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+
+cell_counts <- read.csv(file = paste0(home_dir, "/cell_counts_final_all_4_studies.csv"))
+
+# Derive Species from the GSE prefix
+cell_counts$Species <- ifelse(
+  grepl("GSE140510|GSE208683", cell_counts$Sample),
+  "Mouse", "Human"
+)
+
+# Pivot to long format
+cell_counts_long <- cell_counts %>%
+  pivot_longer(
+    cols = c(Neuron, Astrocyte, Microglia, Oligodendrocyte, OPC, Endothelial, Fibroblast),
+    names_to = "Cell_Type",
+    values_to = "Count"
+  )
+
+cell_counts_long$sample_species <- paste0(cell_counts_long$Sample, "_", cell_counts_long$Species)
+
+# Set sample order: studies grouped as GSE140510, GSE208683, GSE175814, GSE147528
+study_order <- c("GSE140510", "GSE208683", "GSE175814", "GSE147528")
+sample_order <- cell_counts_long %>%
+  mutate(study = sub("_.*", "", Sample)) %>%
+  mutate(study = factor(study, levels = study_order)) %>%
+  arrange(study, Sample) %>%
+  pull(sample_species) %>%
+  unique()
+
+cell_counts_long$sample_species <- factor(cell_counts_long$sample_species, levels = sample_order)
+
+# dittoSeq default colors (Okabe-Ito palette)
+ditto_colors <- c(
+  "Astrocyte"       = "#E69F00",
+  "Endothelial"     = "#56B4E9",
+  "Microglia"       = "#009E73",
+  "Neuron"          = "#F0E442",
+  "Oligodendrocyte" = "#0072B2",
+  "OPC"             = "#D55E00",
+  "Fibroblast"      = "#CC79A7"
+)
+
+p <- ggplot(data = cell_counts_long, aes(x = sample_species, y = Count, fill = Cell_Type)) +
+  geom_bar(stat = "identity", color = "black", linewidth = 0.15, position = position_stack()) +
+  scale_fill_manual(values = ditto_colors) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 16),
+    axis.text.y = element_text(size = 16),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    legend.position = "none"
+  ) +
+  xlab("Sample") +
+  ylab("Total Cell Count")
+
+p
+ggsave(filename = paste0(home_dir, "/figures/manuscript/cell_counts_all_studies_stacked.pdf"),
+       plot = p, width = 12, height = 7)
+p
+```
+
+
+```{r}
+colnames(cell_counts)
+head(cell_counts)
+```
+
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
+
+

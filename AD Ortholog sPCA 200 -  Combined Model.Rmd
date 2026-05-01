@@ -1,0 +1,1199 @@
+---
+title: "AD TransComp-R PCA"
+author: "aberg Bergendorf"
+date: "2023-08-07"
+output: html_document
+---
+
+
+# Library Import
+
+```{r}
+library(Seurat)
+library(mixOmics)
+library(tidyverse)
+library(orthogene)
+library(dittoSeq)
+library(openxlsx)
+#library(PCAtools)
+library(MASS)
+library(glmnet)
+library(pROC)
+
+#home_dir <- "C:/Users/aberg/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+home_dir <- "C:/Users/Alexander/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+```
+
+
+# Loading Models for PC Construction
+
+```{r}
+mouse_gse208683 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse208683_microglia_final.RData"))
+mouse_gse140510 <- readRDS(paste0(home_dir, "/sc_mouse_objects/gse140510_microglia_final.RData"))
+```
+
+```{r}
+merged <- merge(mouse_gse208683, mouse_gse140510, add.cell.ids = c("gse208683", "gse140510"), project = "merged")
+
+# In Seurat v5, layers are split by default after merge. Join them so the assay is truly merged:
+merged <- JoinLayers(merged)
+```
+
+
+```{r}
+# Normalized and scale data, do not center - spca() from mixomics will center
+DefaultAssay(merged) <- "RNA"
+merged <- NormalizeData(merged)
+merged <- FindVariableFeatures(merged, selection.method = "vst", nfeatures = 3250)
+merged <- ScaleData(merged, features = rownames(merged))
+
+mouse_mat <- as.matrix(t(merged@assays$RNA$scale.data[VariableFeatures(merged), ]))
+```
+
+
+
+
+## Run sPCA
+
+```{r}
+mouse_embeddings <- mixOmics::spca(mouse_mat, ncomp = 500,
+                                    center = FALSE, scale = FALSE,
+                                    keepX = rep(200, 35)) 
+```
+
+
+
+## Load sPCA Loadings
+
+```{r}
+# Save spca object output
+saveRDS(mouse_embeddings, file = paste0(home_dir, "/AD_mouse_objects_ortholog/spca_mouse_embeddings_merged_200.RData"))
+#mouse_embeddings <-readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/spca_mouse_embeddings_merged_200.RData"))
+```
+
+```{r}
+as.data.frame(mouse_embeddings$rotation)
+```
+
+
+
+```{r}
+# Variance explained for spca pulled from spca object
+variance_explained <- mouse_embeddings$prop_expl_var$X
+variance_explained <- variance_explained /sum(variance_explained)
+write.csv(variance_explained, paste0(home_dir, "/spca_variances_mouse_merged.csv"))
+```
+
+
+```{r}
+variance <- read.csv(paste0(home_dir, "/spca_variances_mouse_merged.csv"))
+colnames(variance) <- c("PC", "sdev")
+variance$cum_var <- cumsum(variance$sdev)
+variance$observation <- 1:nrow(variance) 
+variance
+```
+
+```{r}
+svg('C:/Users/Alexander/OneDrive/Desktop/Mouse_variance_explained_spca.svg', width = 5, height = 4)
+ggplot(data = variance, aes(x = observation, y = cum_var, group = 1)) +
+  geom_line(color = "black") +  # Changed line color to blue
+  geom_point(color = "black") +  # Added points with the same color
+  geom_hline(yintercept = 0.80, linetype = "dashed", color = "red") +  # Added red dashed line at 0.80 cum_var
+  geom_point(data = subset(variance, cum_var == 0.80), aes(x = PC, y = cum_var), color = "red", size = 3) +  # Add red point at the threshold
+  ylab("Cumulative Variance") + # Changed y-axis label
+  xlab("sPCs") + theme_classic() + theme_bw()
+dev.off()
+```
+
+
+
+## Load sPCA Object
+
+```{r}
+# Create spca reduction on mouse object and save
+#merged[["spca"]] <- CreateDimReducObject(embeddings = mouse_embeddings$x, loadings = mouse_embeddings$rotation, key = "spca")
+#saveRDS(merged, file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_spca_loadings_merged_200.RData"))
+merged <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_spca_loadings_merged_200.RData"))
+```
+
+
+
+```{r include=FALSE}
+# plot pc projections to visualize
+for(i in 2:50){
+p1 <- DimPlot(merged, reduction = "spca", dims = c(1, i), group.by = "phenotype")
+ggsave(filename = paste0(home_dir, "/pc_plots/pc_plot_spca_merged_on_merged_200/pc_", i, ".pdf"))
+}
+```
+
+```{r}
+# Pull feature sparse principal component loadings from object
+principal_components <- merged@reductions$spca@feature.loadings
+principal_components <- as.data.frame(principal_components)
+```
+
+```{r}
+saveRDS(principal_components, paste0(home_dir, "/mouse_feature_loadings_spca_merged_200.RData"))
+```
+
+
+
+## Checking which PCs are significant in mice
+
+```{r}
+merged <- AddMetaData(merged, merged@reductions$spca@cell.embeddings)
+```
+
+```{r}
+#summary(ad.model)
+merged@meta.data$study <- if_else(merged@meta.data$orig.ident %in% c("1_HS", "2_HS", "5_HS", "6_HS"), "GSE208683", "GSE140510")
+```
+
+
+
+```{r}
+pcs <- paste0("spca_", 1:36)
+
+# Test each PC against study (linear model; use Kruskal-Wallis if non-normal)
+study_pvals <- sapply(pcs, function(pc) {
+  f <- as.formula(paste(pc, "~ study"))
+  anova(lm(f, data = merged@meta.data))$"Pr(>F)"[1]
+})
+
+# Adjust for multiple testing
+study_padj <- p.adjust(study_pvals, method = "BH")
+
+results <- data.frame(
+  PC = pcs,
+  p_value = study_pvals,
+  p_adj = study_padj,
+  study_specific = study_padj < 0.05
+)
+
+# PCs NOT significantly associated with study (safe to use)
+not_study_specific <- results$PC[!results$study_specific]
+print(results)
+print(not_study_specific)
+```
+
+The PCs that are separative of study-specific biology include spca1, spca7, spca13
+
+```{r}
+merged$dv <- if_else(merged$phenotype == "C", 0, 1)
+```
+
+```{r}
+ad.model <- glm(dv ~ spca_2 + spca_3 + spca_4 + spca_5 + spca_8 + spca_9 + spca_10 +
+                  spca_11 + spca_12 + spca_14 + spca_15 +
+                  spca_16 + spca_17 + spca_18 + spca_19 + spca_20 +
+                  spca_21 + spca_22 + spca_23 + spca_24 + spca_25 +
+                  spca_26 + spca_27 + spca_28 + spca_29 + spca_30 +
+                  spca_31 + spca_32 + spca_33 + spca_34 + spca_35 +
+                  spca_36
+                  , data = merged@meta.data, family = binomial)
+```
+
+```{r}
+summary(ad.model)
+```
+
+
+# GSE175814 (initial human)
+## Run PCA  for visualization
+
+```{r}
+human_gse175814 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse175814_microglia_final.RData"))
+```
+
+
+
+
+```{r}
+# Rerunning PCA again
+DefaultAssay(human_gse175814) <- "RNA"
+human_gse175814 <- NormalizeData(human_gse175814)
+all.genes <- rownames(human_gse175814)
+human_gse175814 <- ScaleData(human_gse175814, features = all.genes)
+human_gex_matrix <- as.data.frame(LayerData(human_gse175814, assay = "RNA", layer = "scale.data"))
+human_gse175814 <- RunPCA(human_gse175814, features = VariableFeatures(object = human_gse175814))
+```
+
+
+
+## Plotting Human GEX Matrix
+
+```{r}
+# Plotting on UMAP for visualization
+human_gse175814 <- FindNeighbors(human_gse175814, dims = 1:5)
+human_gse175814 <- FindClusters(human_gse175814, resolution = 0.5)
+human_gse175814 <- RunUMAP(human_gse175814, dims = 1:5)
+```
+
+```{r}
+p2 <- dittoDimPlot(human_gse175814, "phenotype", color.panel = c("#F8766D", "#00BFC4"))
+p2
+
+ggsave(filename= paste0(home_dir, "/figures/manuscript/umap_phenotype_gse175814.pdf"), width = 9, height = 7) # name the file as an EPS
+```
+
+
+
+
+```{r}
+# Count of human microglial cells
+count_table <- table(human_gse175814@meta.data$phenotype)
+count_table
+write.csv(count_table, file = paste0(home_dir, "/phenotype_counts_gse175814.csv"))
+```
+
+```{r}
+# Count of human microglial cells
+count_table <- table(human_gse175814@meta.data$orig.ident)
+count_table
+write.csv(count_table, file = paste0(home_dir, "/sample_counts_gse175814.csv"))
+```
+
+
+```{r}
+human_gex_matrix
+principal_components
+```
+
+
+
+```{r}
+# Confirming only orthologs in GEX matrix
+ortholog_mat <- convert_orthologs(gene_df = row.names(human_gex_matrix),
+                                    input_species = "human",
+                                    output_species = "mouse",
+                                    non121_strategy = "drop_both_species")
+
+# Filtering the orthologs based on the 3250 principal component loadings
+ortholog_mat <- ortholog_mat %>%
+  filter(row.names(ortholog_mat) %in% row.names(principal_components))
+        
+
+# Filtering the human gex matrix based on the 3250 principal component loadings
+human_gex_matrix <- human_gex_matrix %>%
+  filter(row.names(human_gex_matrix) %in% ortholog_mat$input_gene)
+
+sum(row.names(human_gex_matrix) == ortholog_mat$input_gene)
+
+# Assigning ortholog names to human gene expression matrix
+row.names(human_gex_matrix) <- row.names(ortholog_mat)
+
+# Arrange alphabetically 
+principal_components  <- principal_components %>% arrange(row.names(principal_components))
+
+# Arrange alphabetically
+human_gex_matrix <- human_gex_matrix %>%
+  arrange(row.names(human_gex_matrix))
+
+```
+
+Now the human data is put in mouse space
+
+```{r}
+sum(row.names(human_gex_matrix) == row.names(principal_components))
+```
+
+
+```{r}
+# converting to matrix
+principal_components <- as.matrix(principal_components)
+human_gex_matrix <- as.matrix(human_gex_matrix)
+
+# Ensuring equal rows, equals 3250
+ncol(t(principal_components))
+nrow(human_gex_matrix)
+
+# Multiplies the transpose of the principal component matrix by the human gex matrix
+multiplication_2 <- t(human_gex_matrix) %*% principal_components
+
+# Creates new dimensional reduction on human Seurat object with the pc projections
+human_gse175814[["spca_projections"]] <- CreateDimReducObject(embeddings = multiplication_2, key = "spca_proj")
+```
+
+```{r}
+human_gse175814$dv <- if_else(human_gse175814$phenotype == "C", 0, 1)
+```
+
+
+
+```{r}
+human_gse175814 <- AddMetaData(human_gse175814, human_gse175814@reductions$spca_projections@cell.embeddings)
+```
+
+
+```{r}
+saveRDS(human_gse175814, paste0(home_dir, "/sc_human_objects/merged_spca_on_gse175814_microglia_final_spca.RData"))
+```
+
+
+
+## Running GLMs on Projected GSE175814
+### 80% variance
+
+```{r}
+human_gse175814 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse175814_microglia_final_spca.RData"))
+```
+
+
+
+```{r}
+# Run GLM
+ad.model <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36
+                  , data = human_gse175814@meta.data, family = binomial)
+
+```
+
+```{r}
+summary(ad.model)
+```
+
+```{r}
+saveRDS(ad.model, file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse175814_glm_80var.RData"))
+```
+
+
+### AIC Optimization
+
+```{r}
+human_gse175814 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse175814_microglia_final_spca.RData"))
+```
+
+```{r}
+# Run GLM
+ad.model <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36
+                  , data = human_gse175814@meta.data, family = binomial)
+```
+
+```{r message=FALSE, include=FALSE}
+final_model <- stepAIC(ad.model, direction = "both")
+```
+
+```{r}
+summary(final_model)
+```
+
+```{r}
+saveRDS(final_model, file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse175814_glm_aic_optimized.RData"))
+```
+
+
+### PC Plots
+
+```{r}
+human_gse175814 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse175814_microglia_final_spca.RData"))
+```
+
+
+
+
+
+```{r}
+# plot pc projections to visualize
+for(i in 2:50){
+p1 <- DimPlot(human_gse175814, reduction = "spca_projections", dims = c(1, i), group.by = "phenotype")
+ggsave(filename = paste0(home_dir, "/pc_plots/pc_plot_spca_merged_on_gse175814/pc_", i, ".pdf"))
+}
+```
+
+
+
+
+# GSE157827 (new human)
+## Run PCA  for visualization
+
+```{r}
+human_gse157827 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse157827_microglia_final.RData"))
+```
+
+
+
+```{r}
+human_gse157827 <- subset(human_gse157827, subset = orig.ident %in% c("AD5", "AD10", "AD19",
+                                                                       "NC3", "NC7", "NC11", "NC12", "NC14", "NC15", "NC16", "NC17", "NC18"))
+```
+
+
+
+
+```{r}
+# Rerunning PCA again
+DefaultAssay(human_gse157827) <- "RNA"
+human_gse157827 <- NormalizeData(human_gse157827)
+all.genes <- rownames(human_gse157827)
+human_gse157827 <- ScaleData(human_gse157827, features = all.genes)
+human_gex_matrix <- as.data.frame(LayerData(human_gse157827, assay = "RNA", layer = "scale.data"))
+human_gse157827 <- RunPCA(human_gse157827, features = VariableFeatures(object = human_gse157827))
+```
+
+
+
+## Plotting Human GEX Matrix
+
+```{r}
+# Plotting on UMAP for visualization
+human_gse157827 <- FindNeighbors(human_gse157827, dims = 1:5)
+human_gse157827 <- FindClusters(human_gse157827, resolution = 0.5)
+human_gse157827 <- RunUMAP(human_gse157827, dims = 1:5)
+```
+
+```{r}
+p2 <- dittoDimPlot(human_gse157827, "phenotype", color.panel = c("#F8766D", "#00BFC4"))
+p2
+ggsave(filename= paste0(home_dir, "/figures/manuscript/umap_phenotype_human_gse157827.pdf"), width = 9, height = 7) # name the file as an EPS
+
+```
+
+```{r}
+# Count of human microglial cells
+count_table <- table(human_gse157827@meta.data$phenotype)
+count_table
+write.csv(count_table, file = paste0(home_dir, "/phenotype_counts_gse157827.csv"))
+```
+
+
+
+```{r}
+# Count of human microglial cells
+count_table <- table(human_gse157827@meta.data$orig.ident)
+count_table
+write.csv(count_table, file = paste0(home_dir, "/sample_counts_gse157827.csv"))
+```
+
+
+
+
+
+
+```{r}
+# Confirming only orthologs in GEX matrix
+ortholog_mat <- convert_orthologs(gene_df = row.names(human_gex_matrix),
+                                    input_species = "human",
+                                    output_species = "mouse",
+                                    non121_strategy = "drop_both_species")
+
+# Filtering the orthologs based on the 3250 principal component loadings
+ortholog_mat <- ortholog_mat %>%
+  filter(row.names(ortholog_mat) %in% row.names(principal_components))
+        
+
+# Filtering the human gex matrix based on the 3250 principal component loadings
+human_gex_matrix <- human_gex_matrix %>%
+  filter(row.names(human_gex_matrix) %in% ortholog_mat$input_gene)
+
+sum(row.names(human_gex_matrix) == ortholog_mat$input_gene)
+
+# Assigning ortholog names to human gene expression matrix
+row.names(human_gex_matrix) <- row.names(ortholog_mat)
+
+# Arrange alphabetically 
+principal_components  <- principal_components %>% arrange(row.names(principal_components))
+
+# Arrange alphabetically
+human_gex_matrix <- human_gex_matrix %>%
+  arrange(row.names(human_gex_matrix))
+
+```
+
+Now the human data is put in mouse space
+
+```{r}
+sum(row.names(human_gex_matrix) == row.names(principal_components))
+```
+
+
+
+```{r}
+# converting to matrix
+principal_components <- as.matrix(principal_components)
+human_gex_matrix <- as.matrix(human_gex_matrix)
+
+# Ensuring equal rows, equals 3250
+ncol(t(principal_components))
+nrow(human_gex_matrix)
+
+# Multiplies the transpose of the principal component matrix by the human gex matrix
+multiplication_2 <- t(human_gex_matrix) %*% principal_components
+
+# Creates new dimensional reduction on human Seurat object with the pc projections
+human_gse157827[["spca_projections"]] <- CreateDimReducObject(embeddings = multiplication_2, key = "spca_proj")
+```
+
+```{r}
+human_gse157827$dv <- if_else(human_gse157827$phenotype == "C", 0, 1)
+```
+
+```{r}
+human_gse157827 <- AddMetaData(human_gse157827, human_gse157827@reductions$spca_projections@cell.embeddings)
+```
+
+
+```{r}
+saveRDS(human_gse157827, paste0(home_dir, "/sc_human_objects/merged_spca_on_gse157827_microglia_final_spca.RData"))
+```
+
+
+
+## Running GLMs on Projected Data
+### 80% variance
+
+```{r}
+human_gse157827 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse157827_microglia_final_spca.RData"))
+```
+
+
+
+```{r}
+# Run GLM
+ad.model <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36
+                  , data = human_gse157827@meta.data, family = binomial)
+
+```
+
+```{r}
+summary(ad.model)
+```
+
+```{r}
+saveRDS(ad.model, file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse157827_glm_80var.RData"))
+```
+
+
+### AIC Optimization
+
+```{r}
+human_gse157827 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse157827_microglia_final_spca.RData"))
+```
+
+```{r}
+# Run GLM
+ad.model <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36
+                  , data = human_gse157827@meta.data, family = binomial)
+```
+
+```{r message=FALSE, include=FALSE}
+final_model <- stepAIC(ad.model, direction = "both")
+```
+
+```{r}
+summary(final_model)
+```
+
+```{r}
+saveRDS(final_model, file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse157827_glm_aic_optimized.RData"))
+```
+
+
+### PC Plots
+
+```{r}
+human_gse157827 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse157827_microglia_final_spca.RData"))
+```
+
+
+
+```{r include=FALSE}
+# plot pc projections to visualize
+for(i in 2:50){
+p1 <- DimPlot(human_gse157827, reduction = "spca_projections", dims = c(1, i), group.by = "phenotype")
+ggsave(filename = paste0(home_dir, "/pc_plots/pc_plot_spca_merged_on_gse157827/pc_", i, ".pdf"))
+}
+```
+
+
+
+
+```{r}
+dittoDimPlot(
+  object = human,                   # Your Seurat object
+  reduction.use = "sspca_projections", # Specify the reduction method
+  dim.1 = 3,                        # Specify the first dimension
+  dim.2 = 5,                        # Specify the second dimension
+  var = "Phase"                  # Metadata variable for coloring
+)
+
+dittoPlot(
+  object = human,             # Your Seurat object
+  var = "G2M.Score",          # The y-axis variable
+  group.by = "Genotype"       # Specify that you want a violin plot
+)
+```
+
+
+# GSE174367 (new human)
+## Run PCA  for visualization
+
+```{r}
+human_gse174367 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse174367_microglia_final.RData"))
+```
+
+
+
+```{r}
+# Rerunning PCA again
+DefaultAssay(human_gse174367) <- "RNA"
+human_gse174367 <- NormalizeData(human_gse174367)
+all.genes <- rownames(human_gse174367)
+human_gse174367 <- ScaleData(human_gse174367, features = all.genes)
+human_gex_matrix <- as.data.frame(LayerData(human_gse174367, assay = "RNA", layer = "scale.data"))
+human_gse174367 <- RunPCA(human_gse174367, features = VariableFeatures(object = human_gse174367))
+```
+
+
+
+## Plotting Human GEX Matrix
+
+```{r}
+# Plotting on UMAP for visualization
+human_gse174367 <- FindNeighbors(human_gse174367, dims = 1:5)
+human_gse174367 <- FindClusters(human_gse174367, resolution = 0.5)
+human_gse174367 <- RunUMAP(human_gse174367, dims = 1:5)
+```
+
+
+
+```{r}
+p2 <- dittoDimPlot(human_gse174367, "Diagnosis", color.panel = c("#F8766D", "#00BFC4"))
+p2
+ggsave(filename= paste0(home_dir, "/figures/manuscript/umap_phenotype_human_gse174367.pdf"), width = 9, height = 7) # name the file as an EPS
+
+```
+
+```{r}
+# Count of human microglial cells
+count_table <- table(human_gse174367@meta.data$Diagnosis)
+count_table
+write.csv(count_table, file = paste0(home_dir, "/phenotype_counts_gse174367.csv"))
+```
+
+
+
+```{r}
+# Count of human microglial cells
+count_table <- table(human_gse174367@meta.data$SampleID)
+count_table
+write.csv(count_table, file = paste0(home_dir, "/sample_counts_gse174367.csv"))
+```
+
+
+
+
+
+
+```{r}
+# Confirming only orthologs in GEX matrix
+ortholog_mat <- convert_orthologs(gene_df = row.names(human_gex_matrix),
+                                    input_species = "human",
+                                    output_species = "mouse",
+                                    non121_strategy = "drop_both_species")
+
+# Filtering the orthologs based on the 3250 principal component loadings
+ortholog_mat <- ortholog_mat %>%
+  filter(row.names(ortholog_mat) %in% row.names(principal_components))
+        
+
+# Filtering the human gex matrix based on the 3250 principal component loadings
+human_gex_matrix <- human_gex_matrix %>%
+  filter(row.names(human_gex_matrix) %in% ortholog_mat$input_gene)
+
+sum(row.names(human_gex_matrix) == ortholog_mat$input_gene)
+
+# Assigning ortholog names to human gene expression matrix
+row.names(human_gex_matrix) <- row.names(ortholog_mat)
+
+# Arrange alphabetically 
+principal_components  <- principal_components %>% arrange(row.names(principal_components))
+
+# Arrange alphabetically
+human_gex_matrix <- human_gex_matrix %>%
+  arrange(row.names(human_gex_matrix))
+
+```
+
+```{r}
+# Ensure both objects are matrices/data frames with gene names as rownames
+human_gex_matrix <- as.data.frame(human_gex_matrix)
+principal_components <- as.data.frame(principal_components)
+
+# Keep only shared genes, in the same order
+shared_genes <- intersect(rownames(human_gex_matrix), rownames(principal_components))
+
+human_gex_matrix <- human_gex_matrix[shared_genes, , drop = FALSE]
+principal_components <- principal_components[shared_genes, , drop = FALSE]
+
+# Optional sanity check
+stopifnot(identical(rownames(human_gex_matrix), rownames(principal_components)))
+```
+
+Now the human data is put in mouse space
+
+```{r}
+sum(row.names(human_gex_matrix) == row.names(principal_components))
+```
+
+
+
+```{r}
+# converting to matrix
+principal_components <- as.matrix(principal_components)
+human_gex_matrix <- as.matrix(human_gex_matrix)
+
+# Ensuring equal rows, equals 3250
+ncol(t(principal_components))
+nrow(human_gex_matrix)
+
+# Multiplies the transpose of the principal component matrix by the human gex matrix
+multiplication_2 <- t(human_gex_matrix) %*% principal_components
+
+# Creates new dimensional reduction on human Seurat object with the pc projections
+human_gse174367[["spca_projections"]] <- CreateDimReducObject(embeddings = multiplication_2, key = "spca_proj")
+```
+
+
+
+```{r}
+human_gse174367$dv <- if_else(human_gse174367$Diagnosis == "Control", 0, 1)
+```
+
+```{r}
+human_gse174367 <- AddMetaData(human_gse174367, human_gse174367@reductions$spca_projections@cell.embeddings)
+```
+
+
+```{r}
+saveRDS(human_gse174367, paste0(home_dir, "/sc_human_objects/merged_spca_on_gse174367_microglia_final_spca.RData"))
+```
+
+
+
+## Running GLMs on Projected Data
+### 80% variance
+
+```{r}
+human_gse174367 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse174367_microglia_final_spca.RData"))
+```
+
+
+
+```{r}
+# Run GLM
+ad.model <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36
+                  , data = human_gse174367@meta.data, family = binomial)
+
+```
+
+```{r}
+summary(ad.model)
+```
+
+```{r}
+saveRDS(ad.model, file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse174367_glm_80var.RData"))
+```
+
+
+### AIC Optimization
+
+```{r}
+human_gse174367 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse174367_microglia_final_spca.RData"))
+```
+
+```{r}
+# Run GLM
+ad.model <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36
+                  , data = human_gse174367@meta.data, family = binomial)
+```
+
+```{r message=FALSE, include=FALSE}
+final_model <- stepAIC(ad.model, direction = "both")
+```
+
+```{r}
+summary(final_model)
+```
+
+```{r}
+saveRDS(final_model, file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse174367_glm_aic_optimized.RData"))
+```
+
+
+### PC Plots
+
+```{r}
+human_gse174367 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse140510_spca_on_gse174367_microglia_final_spca.RData"))
+```
+
+
+
+
+
+```{r}
+# plot pc projections to visualize
+for(i in 2:50){
+p1 <- DimPlot(human_gse174367, reduction = "spca_projections", dims = c(1, i), group.by = "Diagnosis")
+ggsave(filename = paste0(home_dir, "/pc_plots/pc_plot_spca_merged_on_gse174367/pc_", i, ".pdf"))
+}
+```
+
+
+
+
+```{r}
+dittoDimPlot(
+  object = human,                   # Your Seurat object
+  reduction.use = "sspca_projections", # Specify the reduction method
+  dim.1 = 3,                        # Specify the first dimension
+  dim.2 = 5,                        # Specify the second dimension
+  var = "Phase"                  # Metadata variable for coloring
+)
+
+dittoPlot(
+  object = human,             # Your Seurat object
+  var = "G2M.Score",          # The y-axis variable
+  group.by = "Genotype"       # Specify that you want a violin plot
+)
+```
+
+
+
+
+# GSE147528 (new human)
+## Run PCA  for visualization
+
+```{r}
+human_gse147528 <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse147528_microglia_final.RData"))
+```
+
+
+
+```{r}
+# Rerunning PCA again
+DefaultAssay(human_gse147528) <- "RNA"
+human_gse147528 <- NormalizeData(human_gse147528)
+all.genes <- rownames(human_gse147528)
+human_gse147528 <- ScaleData(human_gse147528, features = all.genes)
+human_gex_matrix <- as.data.frame(LayerData(human_gse147528, assay = "RNA", layer = "scale.data"))
+human_gse147528 <- RunPCA(human_gse147528, features = VariableFeatures(object = human_gse147528))
+```
+
+
+
+## Plotting Human GEX Matrix
+
+```{r}
+# Plotting on UMAP for visualization
+human_gse147528 <- FindNeighbors(human_gse147528, dims = 1:5)
+human_gse147528 <- FindClusters(human_gse147528, resolution = 0.5)
+human_gse147528 <- RunUMAP(human_gse147528, dims = 1:5)
+```
+
+
+
+```{r}
+p2 <- dittoDimPlot(human_gse147528, "phenotype", color.panel = c("#F8766D", "#00BFC4"))
+p2
+ggsave(filename= paste0(home_dir, "/figures/manuscript/umap_phenotype_human_gse147528.pdf"), width = 9, height = 7) # name the file as an EPS
+
+```
+
+```{r}
+# Count of human microglial cells
+count_table <- table(human_gse147528@meta.data$phenotype)
+count_table
+write.csv(count_table, file = paste0(home_dir, "/phenotype_counts_gse147528.csv"))
+```
+
+
+
+```{r}
+# Count of human microglial cells
+count_table <- table(human_gse147528@meta.data$orig.ident)
+count_table
+write.csv(count_table, file = paste0(home_dir, "/sample_counts_gse147528.csv"))
+```
+
+
+
+
+
+
+```{r}
+# Confirming only orthologs in GEX matrix
+ortholog_mat <- convert_orthologs(gene_df = row.names(human_gex_matrix),
+                                    input_species = "human",
+                                    output_species = "mouse",
+                                    non121_strategy = "drop_both_species")
+
+# Filtering the orthologs based on the 3250 principal component loadings
+ortholog_mat <- ortholog_mat %>%
+  filter(row.names(ortholog_mat) %in% row.names(principal_components))
+        
+
+# Filtering the human gex matrix based on the 3250 principal component loadings
+human_gex_matrix <- human_gex_matrix %>%
+  filter(row.names(human_gex_matrix) %in% ortholog_mat$input_gene)
+
+sum(row.names(human_gex_matrix) == ortholog_mat$input_gene)
+
+# Assigning ortholog names to human gene expression matrix
+row.names(human_gex_matrix) <- row.names(ortholog_mat)
+
+# Arrange alphabetically 
+principal_components  <- principal_components %>% arrange(row.names(principal_components))
+
+# Arrange alphabetically
+human_gex_matrix <- human_gex_matrix %>%
+  arrange(row.names(human_gex_matrix))
+
+```
+
+Now the human data is put in mouse space
+
+
+```{r}
+# converting to matrix
+principal_components <- as.matrix(principal_components)
+human_gex_matrix <- as.matrix(human_gex_matrix)
+
+# Ensuring equal rows, equals 3250
+ncol(t(principal_components))
+nrow(human_gex_matrix)
+
+# Multiplies the transpose of the principal component matrix by the human gex matrix
+multiplication_2 <- t(human_gex_matrix) %*% principal_components
+
+# Creates new dimensional reduction on human Seurat object with the pc projections
+human_gse147528[["spca_projections"]] <- CreateDimReducObject(embeddings = multiplication_2, key = "spca_proj")
+```
+
+
+
+```{r}
+human_gse147528$dv <- if_else(human_gse147528$phenotype == "C", 0, 1)
+```
+
+```{r}
+human_gse147528 <- AddMetaData(human_gse147528, human_gse147528@reductions$spca_projections@cell.embeddings)
+```
+
+
+```{r}
+saveRDS(human_gse147528, paste0(home_dir, "/sc_human_objects/merged_spca_on_gse147528_microglia_final_spca.RData"))
+```
+
+
+
+## Running GLMs on Projected Data
+### 80% variance
+
+```{r}
+human_gse147528 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse147528_microglia_final_spca.RData"))
+```
+
+
+
+```{r}
+# Run GLM
+ad.model <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36
+                  , data = human_gse147528@meta.data, family = binomial)
+
+```
+
+```{r}
+summary(ad.model)
+```
+
+```{r}
+saveRDS(ad.model, file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse147528_glm_80var.RData"))
+```
+
+
+### AIC Optimization
+
+```{r}
+human_gse147528 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse147528_microglia_final_spca.RData"))
+```
+
+```{r}
+# Run GLM
+ad.model <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36
+                  , data = human_gse147528@meta.data, family = binomial)
+```
+
+```{r message=FALSE, include=FALSE}
+final_model <- stepAIC(ad.model, direction = "both")
+```
+
+```{r}
+summary(final_model)
+```
+
+```{r}
+saveRDS(final_model, file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse147528_glm_aic_optimized.RData"))
+```
+
+
+### PC Plots
+
+```{r}
+human_gse147528 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse147528_microglia_final_spca.RData"))
+```
+
+
+
+```{r include=FALSE}
+# plot pc projections to visualize
+for(i in 2:50){
+p1 <- DimPlot(human_gse147528, reduction = "spca_projections", dims = c(1, i), group.by = "phenotype")
+ggsave(filename = paste0(home_dir, "/pc_plots/pc_plot_spca_merged_on_gse147528/pc_", i, ".pdf"))
+}
+```
+
+
+
+
+```{r}
+dittoDimPlot(
+  object = human,                   # Your Seurat object
+  reduction.use = "sspca_projections", # Specify the reduction method
+  dim.1 = 3,                        # Specify the first dimension
+  dim.2 = 5,                        # Specify the second dimension
+  var = "Phase"                  # Metadata variable for coloring
+)
+
+dittoPlot(
+  object = human,             # Your Seurat object
+  var = "G2M.Score",          # The y-axis variable
+  group.by = "Genotype"       # Specify that you want a violin plot
+)
+```
+
+
+# Comparing the Performance of the Two Human Models
+
+```{r}
+human_gse175814 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse175814_microglia_final_spca.RData"))
+```
+
+
+
+```{r}
+# Run GLM
+ad.model.gse175814 <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36
+                  , data = human_gse175814@meta.data, family = binomial)
+
+```
+
+
+```{r}
+human_gse147528 <- readRDS(file = paste0(home_dir, "/sc_human_objects/merged_spca_on_gse147528_microglia_final_spca.RData"))
+```
+
+
+
+```{r}
+# Run GLM
+ad.model.gse147528 <- glm(dv ~ spcaproj_1 + spcaproj_2 + spcaproj_3 + spcaproj_4 + spcaproj_5 + 
+                  spcaproj_6 + spcaproj_7 + spcaproj_8 + spcaproj_9 + spcaproj_10 +
+                  spcaproj_11 + spcaproj_12 + spcaproj_13 + spcaproj_14 + spcaproj_15 +
+                  spcaproj_16 + spcaproj_17 + spcaproj_18 + spcaproj_19 + spcaproj_20 +
+                  spcaproj_21 + spcaproj_22 + spcaproj_23 + spcaproj_24 + spcaproj_25 +
+                  spcaproj_26 + spcaproj_27 + spcaproj_28 + spcaproj_29 + spcaproj_30 +
+                  spcaproj_31 + spcaproj_32 + spcaproj_33 + spcaproj_34 + spcaproj_35 +
+                  spcaproj_36
+                  , data = human_gse147528@meta.data, family = binomial)
+
+```
+
+```{r}
+summary(ad.model.gse147528)
+```
+
+```{r}
+summary(ad.model.gse175814)
+```
+
+
+
+
+
+
+
+
+
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+

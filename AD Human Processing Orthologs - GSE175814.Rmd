@@ -1,0 +1,678 @@
+---
+title: "AD Human Processing - GSE175814 "
+author: "Alexander Bergendorf"
+date: "2026-03-18"
+output: html_document
+---
+
+# Library Import
+
+```{r}
+library(Seurat) 
+library(tidyverse) 
+library(patchwork) 
+library(dittoSeq) 
+library(stringr)
+library(gprofiler2)
+library(harmony)
+library(patchwork)
+library(cowplot)
+library(openxlsx)
+library(MAST)
+
+home_dir <- "/mnt/vstor/SOM_PATH_DKB50/members/axb1812/AD_Project_Microglia"
+
+```
+
+
+# Data Import
+
+```{r}
+samples <- c("A1", "A2", "A3", "A4")
+
+
+names <- c("AD1", "C1", "AD2", "C2")
+
+
+
+data_list <- list()
+
+# Load in human data
+for(i in samples){ 
+  data <- Read10X(paste0(home_dir, "/data/GSE175814/", i)) 
+  data_list[[i]] <- data
+  print(i)
+} 
+```
+
+```{r}
+names(data_list) <- names
+```
+
+
+```{r}
+data_list
+```
+
+
+# Create Seurat object of human orthologs
+
+```{r}
+for(i in names){ 
+  data_list[[i]] <- CreateSeuratObject(counts = data_list[[i]], project = i)
+} 
+```
+
+
+# Filter for orthologs
+
+```{r}
+human_ortholog <- readRDS(file = paste0(home_dir, "/human_orthologs_6datasets.RData"))
+```
+
+
+
+```{r}
+# Filter human data based on orthologs
+for(i in names){
+  data_list[[i]] <- data_list[[i]][human_ortholog]
+}
+```
+
+
+
+
+# Calculating Quality Control Metrics
+
+```{r}
+for(i in names){ 
+  data_list[[i]][["rna.size"]] <- log10(Matrix::colSums(GetAssayData(data_list[[i]], assay = "RNA", layer = "counts")))
+  data_list[[i]][["percent.mt"]] <- PercentageFeatureSet(data_list[[i]], pattern = "^MT-")
+}
+```
+
+# QC and Visualization
+
+
+```{r}
+data_list_test <- merge(x = data_list[[1]], y = data_list[2:length(data_list)], merge.data = TRUE)
+df <- data_list_test@meta.data
+
+# RNA size
+p1 <- ggplot(df, aes(x = orig.ident, y = rna.size, fill = orig.ident)) +
+  geom_violin() +
+  geom_jitter(width = 0.25, size = 0.1, alpha = 0.4) +
+  theme_classic(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  labs(x = "Sample", y = "RNA Size")
+# Or more directly, open the device manually:
+ggsave(paste0(home_dir, "/Manuscript Figures/rnasize_qc_gse175814.pdf"),
+       plot = p1, device = cairo_pdf, width = 6, height = 5, units = "in")
+
+# Percent MT
+p2 <- ggplot(df, aes(x = orig.ident, y = percent.mt, fill = orig.ident)) +
+  geom_violin() +
+  geom_jitter(width = 0.25, size = 0.1, alpha = 0.4) +
+  theme_classic(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  labs(x = "Sample", y = "Percent MT")
+ggsave(paste0(home_dir, "/Manuscript Figures/mt_qc_gse175814.pdf"),
+       plot = p2, device = cairo_pdf, width = 6, height = 5, units = "in")
+
+gc()
+```
+
+
+
+```{r}
+rna_size_min <- list() 
+rna_size_max <- list() 
+
+# Calculates 3 MAD from the median rna-size, filters out if outside that range
+for(i in names){ 
+  rna_size_min[[i]] <- median(data_list[[i]]@meta.data$rna.size) - (3*mad(data_list[[i]]@meta.data$rna.size)) 
+  
+  rna_size_max[[i]] <- median(data_list[[i]]@meta.data$rna.size) + (3*mad(data_list[[i]]@meta.data$rna.size)) 
+} 
+```
+
+
+
+```{r}
+# Save QC metric DF
+qc_metrics <- c() 
+for(i in names){ 
+  preqc_cells <- ncol(data_list[[i]]) 
+  qc_metrics <- rbind(qc_metrics, preqc_cells) 
+}
+
+colnames(qc_metrics) <- "preqc_cells" 
+row.names(qc_metrics) <- NULL 
+preqc_metrics <- as.data.frame(qc_metrics)
+```
+
+
+
+```{r}
+# Filter based on QC metrics
+for(i in names){ 
+  temp_max <- rna_size_max[[i]] 
+  temp_min <-  rna_size_min[[i]] 
+  data_list[[i]] <- subset(data_list[[i]], subset = percent.mt < 10 & rna.size < temp_max & rna.size > temp_min) 
+  
+}
+```
+
+
+```{r}
+# Finish QC Table
+qc_metrics <- c() 
+for(i in names){ 
+  preqc_cells <- ncol(data_list[[i]]) 
+  qc_metrics <- rbind(qc_metrics, preqc_cells) 
+}
+```
+
+
+
+```{r}
+colnames(qc_metrics) <- "postqc_cells" 
+row.names(qc_metrics) <- NULL 
+postqc_metrics <- as.data.frame(qc_metrics)
+cellcounts <- cbind(preqc_metrics, postqc_metrics)
+write.csv(cellcounts, file = paste0(home_dir, "/results/gse175814_human_cellcounts_ortholog.csv"))
+```
+
+
+```{r}
+cellcounts
+```
+
+
+
+
+# Check Cell Cycle after clustering
+
+```{r}
+# Cell Cycle Scoring Addition
+
+s.genes <- cc.genes$s.genes 
+g2m.genes <- cc.genes$g2m.genes 
+
+for(i in names){ 
+  data_list[[i]] <- NormalizeData(data_list[[i]]) 
+  data_list[[i]] <- CellCycleScoring(data_list[[i]], s.features = s.genes, g2m.features = g2m.genes) 
+} 
+```
+
+# SCTransform
+```{r include=FALSE}
+#Applies SCTransform individually to each sample 
+data_list <- lapply(X = data_list, FUN = SCTransform,  method ="glmGamPoi", return.only.var.genes = FALSE, vars.to.regress = c("S.Score", "G2M.Score")) 
+```
+
+
+```{r}
+# Save data after SCTransform, computationally intensive
+#saveRDS(data_list, file = paste0(home_dir, "/sc_human_objects/gse175814_data_list_ortholog.RData"))
+#processed_list <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse175814_data_list_ortholog.RData"))
+```
+
+```{r}
+processed_list <- data_list
+rm(data_list)
+```
+
+
+
+
+
+# Batch
+
+```{r}
+# Select integration features across samples
+variable.features <- SelectIntegrationFeatures(object.list = processed_list, nfeatures = 3000)
+
+# Start with the first Seurat object
+combined <- processed_list[[1]]
+
+# Create a list with the remaining objects
+remaining_objects <- processed_list[-1]
+
+# Optionally remove the original list to free memory
+rm(processed_list)
+gc()
+
+# Merge objects sequentially while removing them from the list and printing progress
+while (length(remaining_objects) > 0) {
+  # Merge the first remaining object into 'combined'
+  combined <- merge(combined, remaining_objects[[1]])
+  
+  combined <- JoinLayers(combined, assay = "RNA")
+
+  # Remove the merged object from the list
+  remaining_objects[[1]] <- NULL
+  
+  # Print the number of objects left to merge
+  cat("Remaining objects to merge:", length(remaining_objects), "\n")
+  
+  # Prompt garbage collection to free memory
+  gc()
+}
+
+
+# Assigns variable features calculated across samples
+VariableFeatures(combined) <- variable.features 
+```
+
+
+
+```{r}
+# Performs PCA
+combined <- RunPCA(combined, verbose = FALSE) 
+```
+
+```{r}
+variance <- (combined@reductions$pca@stdev)^2
+variance <- variance / sum(variance)
+variance
+```
+
+
+```{r}
+# PC Plot before integration occurs
+options(repr.plot.height = 12, repr.plot.width = 20) 
+p1 <- DimPlot(object = combined, reduction = "pca", pt.size = 2, group.by = "orig.ident", raster = TRUE) 
+#p2 <- VlnPlot(object = combined, features = "PC_1", group.by = "SampleID", pt.size = 0) 
+#plot_grid(p1,p2)
+ggsave(filename= paste0(home_dir, "/Manuscript Figures/gse175814_pre_batch.pdf"),
+       plot = p1, device = cairo_pdf, width = 6, height = 5, units = "in") # name the file as an EPS
+```
+
+
+We should batch correct.
+
+```{r include=FALSE}
+# Running Harmony  
+options(repr.plot.height = 8, repr.plot.width = 16) 
+
+pdf(NULL)
+combined <- RunHarmony(combined, assay.use = "SCT", group.by.vars = "orig.ident", plot_convergence = FALSE) 
+dev.off()
+```
+
+```{r}
+variance <- (combined@reductions$harmony@stdev)^2
+variance <- variance / sum(variance)
+variance
+```
+
+
+
+
+```{r}
+# PC plot after integration occurs
+p1 <- DimPlot(object = combined, reduction = "harmony", pt.size = 2, group.by = "orig.ident", raster = TRUE) 
+
+#p2 <- VlnPlot(object = data_list, features = "harmony_1", group.by = "SampleID", pt.size = 0) 
+ggsave(filename= paste0(home_dir, "/Manuscript Figures/gse175814_post_batch.pdf"),
+       plot = p1, device = cairo_pdf, width = 6, height = 5, units = "in") # name the file as an EPS
+```
+
+
+
+```{r}
+# Elbowplot to select PCs for clustering
+p1 <- ElbowPlot(combined, reduction = "harmony", n = 50) 
+
+ggsave(filename= paste0(home_dir, "/figures/gse175814/elbowplot.png"), width = 9, height = 7) # name the file as an EPS
+```
+
+Start with 30 PCS, check separation
+
+
+# Reducing Dimensionality and Clustering
+
+```{r}
+#Performing Dimensional Reduction 
+
+# UMAP
+combined <- RunUMAP(combined, reduction = "harmony", dims = 1:30, verbose = FALSE) 
+
+# Find Neighboring cells 
+combined <- FindNeighbors(combined, reduction = "harmony", dims = 1:30, verbose = FALSE) 
+
+# knn clustering
+combined <- FindClusters(combined, resolution = 1, verbose = FALSE) 
+```
+
+
+```{r}
+# Visualize data
+p1 <- dittoDimPlot(combined, "seurat_clusters", do.label = TRUE, legend.show = FALSE, labels.size = 3) 
+ggsave(filename= paste0(home_dir, "/figures/gse175814/seurat_clusters.png"), width = 9, height = 7) # name the file as an EPS
+
+p1 <- dittoDimPlot(combined, "orig.ident") 
+ggsave(filename= paste0(home_dir, "/figures/gse175814/orig.ident.png"), width = 9, height = 7) # name the file as an EPS
+
+p1 <- dittoDimPlot(combined, "percent.mt") 
+ggsave(filename= paste0(home_dir, "/figures/gse175814/percent.mt.png"), width = 9, height = 7) # name the file as an EPS
+
+p1 <- dittoDimPlot(combined, "Phase") 
+ggsave(filename= paste0(home_dir, "/figures/gse175814/Phase.png"), width = 9, height = 7) # name the file as an EPS
+
+```
+
+```{r}
+# Save dataset after clustering
+#saveRDS(combined, file = paste0(home_dir, "/sc_human_objects/gse175814_final.RData"))
+combined <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse175814_final.RData"))
+```
+
+# Visualizing Data
+
+
+```{r}
+# Visualization of some markers
+marker_list <- c("GAD1", "NRGN",
+             "ANLN", 
+             "VCAN", 
+             "CABLES1", "AQP4", 
+             "VWF", "FLT1",
+             "CSF1R", "DCN")
+Idents(combined) <- combined@meta.data$seurat_clusters
+for(i in marker_list){
+  p1 <- dittoDimPlot(combined, var = i, assay = "RNA")
+  ggsave(filename = paste0(home_dir, "/figures/gse175814/markers/umap_", i, ".png"),
+         plot = p1, width = 9, height = 7)
+}
+
+# Dot plot of all markers across clusters
+p2 <- DotPlot(combined, features = marker_list, assay = "RNA") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_discrete(limits = rev)
+ggsave(filename = paste0(home_dir, "/figures/gse175814/markers/dotplot_markers.png"),
+       plot = p2, width = 9, height = 7)
+```
+
+
+
+
+# Finding Cluster Identifiers
+
+```{r}
+# Get unique identifiers
+unique_idents <- as.character(unique(combined@meta.data$seurat_clusters))
+unique_idents
+
+# Initialize an empty list to store the results
+markers_list <- list()
+
+# Loop over each identifier and run FindMarkers
+for (id in unique_idents) {
+  markers_list[[id]] <- FindMarkers(
+    object = combined,
+    ident.1 = id,
+    only.pos = TRUE,
+    assay = "RNA",
+    max.cells.per.ident = 300
+  )
+}
+
+saveRDS(markers_list, paste0(home_dir, "/results/all_cell_markers_human_ortholog_gse175814.RData"))
+```
+
+```{r}
+# Save dataset after clustering
+#saveRDS(combined, file = paste0(home_dir, "/sc_human_objects/gse175814_final.RData"))
+combined <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse175814_final.RData"))
+```
+
+```{r}
+table(combined@meta.data$summary, combined@meta.data$orig.ident)
+```
+```{r}
+5480+10880
+```
+
+
+
+```{r}
+markers_list <- readRDS(paste0(home_dir, "/results/all_cell_markers_human_ortholog_gse175814.RData"))
+# Get counts per cluster from the Seurat object
+cluster_counts <- table(combined$seurat_clusters)
+
+# Rename each list element: "clusternumber_clustercount"
+for (cl in names(markers_list)) {
+  names(markers_list)[names(markers_list) == cl] <- paste0(cl, "_n", cluster_counts[[cl]])
+}
+```
+
+
+
+```{r}
+write.xlsx(markers_list, file = paste0(home_dir, "/results/all_cell_markers_human_ortholog_gse175814.xlsx"), rowNames = TRUE)
+```
+
+
+0- Neuron
+1- Neuron
+2- Astrocyte
+3- Astrocyte
+4- Microglia
+5- Oligodendrocyte
+6- OPC
+7- Oligodendrocyte
+8- Neuron
+9- Oligodendrocyte
+10- Neuron
+11- Neuron
+12- Endothelial
+13- Neuron
+14- Microglia
+15- Neuron
+16- Neuron
+17- Neuron
+18- Neuron
+19- Neuron
+20- Neuron
+21- Neuron
+22- Fibroblast
+23- Doublet
+24- Neuron
+25- Neuron
+26- Neuron
+27- Neuron
+28- Neuron
+29- Doublet
+30- Doublet
+31- Doublet
+
+
+
+
+
+# Assign Idents
+
+```{r}
+# Drop unused cluster levels after subsetting
+combined$seurat_clusters <- droplevels(combined$seurat_clusters)
+# Summary Idents
+Idents(combined) <- combined@meta.data$seurat_clusters
+new.cluster.ids <- c(
+  "Neuron",         # 0
+  "Neuron",         # 1
+  "Astrocyte",      # 2
+  "Astrocyte",      # 3
+  "Microglia",      # 4
+  "Oligodendrocyte",# 5
+  "OPC",            # 6
+  "Oligodendrocyte",# 7
+  "Neuron",         # 8
+  "Oligodendrocyte",# 9
+  "Neuron",         # 10
+  "Neuron",         # 11
+  "Endothelial",    # 12
+  "Neuron",         # 13
+  "Microglia",      # 14
+  "Neuron",         # 15
+  "Neuron",         # 16
+  "Neuron",         # 17
+  "Neuron",         # 18
+  "Neuron",         # 19
+  "Neuron",         # 20
+  "Neuron",         # 21
+  "Fibroblast",     # 22
+  "Doublet",        # 23
+  "Neuron",         # 24
+  "Neuron",         # 25
+  "Neuron",         # 26
+  "Neuron",         # 27
+  "Neuron",         # 28
+  "Doublet",        # 29
+  "Doublet",        # 30
+  "Doublet"         # 31
+)
+names(new.cluster.ids) <- levels(combined)
+combined <- RenameIdents(combined, new.cluster.ids)
+combined@meta.data$summary <- Idents(combined)
+```
+
+```{r}
+# Detailed Idents
+Idents(combined) <- combined@meta.data$seurat_clusters
+new.cluster.ids <- c(
+  "Neuron_0",           # 0
+  "Neuron_1",           # 1
+  "Astrocyte_2",        # 2
+  "Astrocyte_3",        # 3
+  "Microglia_4",        # 4
+  "Oligodendrocyte_5",  # 5
+  "OPC_6",              # 6
+  "Oligodendrocyte_7",  # 7
+  "Neuron_8",           # 8
+  "Oligodendrocyte_9",  # 9
+  "Neuron_10",          # 10
+  "Neuron_11",          # 11
+  "Endothelial_12",     # 12
+  "Neuron_13",          # 13
+  "Microglia_14",       # 14
+  "Neuron_15",          # 15
+  "Neuron_16",          # 16
+  "Neuron_17",          # 17
+  "Neuron_18",          # 18
+  "Neuron_19",          # 19
+  "Neuron_20",          # 20
+  "Neuron_21",          # 21
+  "Fibroblast_22",      # 22
+  "Doublet_23",         # 23
+  "Neuron_24",          # 24
+  "Neuron_25",          # 25
+  "Neuron_26",          # 26
+  "Neuron_27",          # 27
+  "Neuron_28",          # 28
+  "Doublet_29",         # 29
+  "Doublet_30",         # 30
+  "Doublet_31"          # 31
+)
+names(new.cluster.ids) <- levels(combined)
+combined <- RenameIdents(combined, new.cluster.ids)
+combined@meta.data$detail <- Idents(combined)
+```
+
+
+
+Source used for cell type assignment
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6329831/
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6671143/ 
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6655561/
+
+
+```{r}
+# Visualize data
+p1 <- dittoDimPlot(combined, "summary", do.label = TRUE, legend.show = FALSE, labels.size = 3) 
+ggsave(filename= paste0(home_dir, "/figures/gse175814/summary.png"), width = 9, height = 7) # name the file as an EPS
+
+p1 <- dittoDimPlot(combined, "detail") 
+ggsave(filename= paste0(home_dir, "/figures/gse175814/detail.png"), width = 9, height = 7) # name the file as an EPS
+
+```
+
+```{r}
+combined <- subset(combined, subset = summary == "Doublet", invert = TRUE)
+combined$summary <- droplevels(combined$summary)
+Idents(combined) <- droplevels(Idents(combined))
+```
+
+
+```{r}
+# Save dataset after clustering
+#saveRDS(combined, file = paste0(home_dir, "/sc_human_objects/gse175814_final_filtered.RData"))
+combined <- readRDS(file = paste0(home_dir, "/sc_human_objects/gse175814_final_filtered.RData"))
+```
+
+
+
+
+```{r}
+table(combined@meta.data$orig.ident)
+```
+
+
+# Visualizations for Manuscript
+
+## UMAP
+
+```{r}
+# UMAP of Human cells
+Idents(combined) <- combined@meta.data$summary
+levels(combined) <- c("Astrocyte", "Endothelial", "Microglia", 
+                      "Neuron", "Oligodendrocyte", "OPC", "Fibroblast")
+
+p1 <- dittoDimPlot(combined, Idents(combined)) +
+  theme(
+    axis.title = element_text(size = 16),   # both x and y axis titles
+    axis.text  = element_text(size = 14),   # both x and y tick labels
+    axis.ticks.length = unit(0.25, "cm")    # physical tick mark length
+  )
+
+ggsave(filename= paste0(home_dir, "/Manuscript Figures/GSE175814_umap.eps"), width = 9, height = 7) # name the file as an EPS
+```
+
+## DotPlot
+
+```{r}
+levels(combined) <- c("Microglia", "Endothelial", "Fibroblast", "Astrocyte", 
+                      "OPC", "Oligodendrocyte", "Neuron")
+markers <- c("GAD1", "NRGN",
+             "ANLN", 
+             "VCAN", 
+             "CABLES1", "AQP4",
+             "DCN",
+             "VWF", "FLT1", 
+             "CSF1R")
+# Dotplot of common human markers
+markers <- rev(markers)
+p2 <- DotPlot(combined, features = markers, assay = "RNA") + 
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1, size = 14),
+    axis.text.y  = element_text(size = 14),
+    axis.title   = element_text(size = 16),
+    legend.text  = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  ) + 
+  scale_y_discrete(limits = rev)
+ggsave(filename= paste0(home_dir, "/Manuscript Figures/GSE175814_dotplot.eps"), width = 9, height = 7) # name the file as an EPS
+
+```
+
+
+
+
+# Session Information
+
+```{r}
+sessionInfo()
+```

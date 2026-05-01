@@ -1,0 +1,634 @@
+---
+title: "AD Mouse Processing - GSE208683"
+author: "Alexander Bergendorf"
+date: "2023-06-15"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Library Import
+```{r}
+library(Seurat) 
+library(tidyverse) 
+library(patchwork) 
+library(dittoSeq) 
+library(stringr)
+library(gprofiler2)
+library(harmony)
+library(patchwork)
+library(cowplot)
+library(openxlsx)
+library(MAST)
+#library(glmGamPoi)
+
+#home_dir <- "C:/Users/aberg/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+home_dir <- "C:/Users/Alexander/OneDrive/Desktop/Research_Brubaker/Undergraduate Research/AD TransComp-R Project Summer-Fall 2023/Brubaker Summer Research 2023"
+```
+
+# Normal Object Setup
+## Data Import
+
+```{r}
+## Reading in mouse data, only normal cells
+#rownames <- rep("character", 1)
+#control <- rep("integer", 15013)
+#other <- rep("NULL", 46936)
+#colClasses <- c(rownames, control, other)
+
+#counts <- read.table(file = paste0(home_dir, "/AD_mouse_raw/GSE208683_Allcell_6m_UMI_matrix.txt"), sep = "\t", colClasses = colClasses)
+#metadata <- read.table(file = paste0(home_dir, "/AD_mouse_raw/GSE208683_Allcell_6m_meta_data.txt"), sep = "\t")
+
+#metadata <- metadata[1:15013,]
+```
+
+
+## Create Object
+
+```{r}
+#colnames(counts) <- gsub("\\.", "-", colnames(counts))
+#wild_type <- CreateSeuratObject(counts = counts, meta.data = metadata)
+# These are the previous identifications of the wild type cells from the data source
+#table(wild_type@meta.data$SampleID, wild_type@meta.data$CellType)
+#rm(counts, metadata)
+```
+
+
+```{r}
+#saveRDS(wild_type, file = paste0(home_dir, "/AD_mouse_objects_ortholog/wt_ortholog.RData"))
+#wild_type <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/wt_ortholog.RData"))
+```
+
+
+# AD Object Setup
+## Data Import
+```{r}
+## Reading in human data, only 5xFAD cells only
+#rownames <- rep("character", 1)
+#other1 <- rep("NULL", 31848)
+#ad <- rep("integer", 14662)
+#other2 <- rep("NULL",15439)
+#colClasses <- c(rownames, other1, ad, other2)
+
+#counts <- read.table(file = paste0(home_dir, "/AD_mouse_raw/GSE208683_Allcell_6m_UMI_matrix.txt"), sep = "\t", colClasses = colClasses)
+#metadata <- read.table(file = paste0(home_dir, "/AD_mouse_raw/GSE208683_Allcell_6m_meta_data.txt"), sep = "\t")
+
+#metadata <- metadata[31849:46510,]
+```
+
+## Create Object
+```{r}
+#colnames(counts) <- gsub("\\.", "-", colnames(counts))
+#ad <- CreateSeuratObject(counts = counts, meta.data = metadata)
+## These are the previous identifications of the wild type cells from the data source
+#table(ad@meta.data$SampleID, ad@meta.data$CellType)
+#rm(counts, metadata)
+```
+
+
+```{r}
+#saveRDS(ad, file = paste0(home_dir, "/AD_mouse_objects_ortholog/ad_ortholog.RData"))
+#ad <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/ad_ortholog.RData"))
+```
+
+# Merging and Processing Data
+
+```{r}
+ad <- readRDS(file = paste0(home_dir, "/ad_mouse_objects_ortholog/ad_ortholog_gse208683.RData"))
+wild_type <- readRDS(file = paste0(home_dir, "/ad_mouse_objects_ortholog/wt_ortholog_gse208683.RData"))
+
+ad <- SplitObject(ad, split.by = "SampleID")
+wild_type <- SplitObject(wild_type, split.by = "SampleID")
+data_list <- c(ad, wild_type)
+#rm(ad, wild_type)
+```
+
+
+```{r}
+table(data_list$AD_1@meta.data$orig.ident)
+table(data_list$AD_2@meta.data$orig.ident)
+```
+
+
+
+
+```{r}
+head(data_list$AD_1@meta.data)
+# Creating chr vector to loop over for mouse data
+names <- c("AD_1", "AD_2", "WT_1", "WT_2")
+```
+
+```{r}
+mouse_ortholog <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/mouse_orthologs_6datasets.RData"))
+```
+
+
+```{r}
+# Filter mouse data based on orthologs
+for(i in names){
+  data_list[[i]] <- data_list[[i]][mouse_ortholog]
+}
+```
+
+
+
+# Calculating Quality Control Metrics
+
+
+```{r}
+for(i in names){ 
+  data_list[[i]][["rna.size"]] <- log10(Matrix::colSums(GetAssayData(data_list[[i]], assay = "RNA", layer = "counts")))
+  data_list[[i]][["percent.mt"]] <- PercentageFeatureSet(data_list[[i]], pattern = "^mt-")
+}
+```
+
+
+```{r}
+data_list_test <- merge(x = data_list[[1]], y = data_list[2:length(data_list)], merge.data = TRUE)
+df <- data_list_test@meta.data
+
+# RNA size
+p1 <- ggplot(df, aes(x = SampleID, y = rna.size, fill = SampleID)) +
+  geom_violin() +
+  rasterise(geom_jitter(width = 0.25, size = 0.1, alpha = 0.4), dpi = 300) +
+  theme_classic(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  labs(x = "Sample", y = "RNA Size")
+
+ggsave(paste0(home_dir, "/Manuscript Figures/New Data/rnasize_qc_gse208683.pdf"),
+       plot = p1, device = cairo_pdf, width = 6, height = 5, units = "in")
+
+# Percent MT
+p2 <- ggplot(df, aes(x = SampleID, y = percent.mt, fill = SampleID)) +
+  geom_violin() +
+  rasterise(geom_jitter(width = 0.25, size = 0.1, alpha = 0.4), dpi = 300) +
+  theme_classic(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  labs(x = "Sample", y = "Percent MT")
+
+ggsave(paste0(home_dir, "/Manuscript Figures/New Data/mt_qc_gse208683.pdf"),
+       plot = p2, device = cairo_pdf, width = 6, height = 5, units = "in")
+```
+
+
+```{r}
+rna_size_min <- list() 
+rna_size_max <- list() 
+
+# Calculates 3 MAD from the median rna-size, filters out if outside that range
+for(i in names){ 
+  rna_size_min[[i]] <- median(data_list[[i]]@meta.data$rna.size) - (3*mad(data_list[[i]]@meta.data$rna.size)) 
+  
+  rna_size_max[[i]] <- median(data_list[[i]]@meta.data$rna.size) + (3*mad(data_list[[i]]@meta.data$rna.size)) 
+} 
+```
+
+
+```{r}
+# Save QC metric DF
+qc_metrics <- c() 
+for(i in names){ 
+  preqc_cells <- ncol(data_list[[i]]) 
+  qc_metrics <- rbind(qc_metrics, preqc_cells) 
+}
+
+colnames(qc_metrics) <- "preqc_cells" 
+row.names(qc_metrics) <- NULL 
+preqc_metrics <- as.data.frame(qc_metrics)
+```
+
+
+```{r}
+# Filter based on QC metrics
+for(i in names){ 
+  temp_max <- rna_size_max[[i]] 
+  temp_min <-  rna_size_min[[i]] 
+  data_list[[i]] <- subset(data_list[[i]], subset = percent.mt < 10 & rna.size < temp_max & rna.size > temp_min) 
+  
+}
+```
+
+
+```{r}
+# Finish QC Table
+qc_metrics <- c() 
+for(i in names){ 
+  preqc_cells <- ncol(data_list[[i]]) 
+  qc_metrics <- rbind(qc_metrics, preqc_cells) 
+}
+```
+
+```{r}
+colnames(qc_metrics) <- "postqc_cells" 
+row.names(qc_metrics) <- NULL 
+postqc_metrics <- as.data.frame(qc_metrics)
+cellcounts <- cbind(preqc_metrics, postqc_metrics)
+cellcounts
+```
+
+```{r}
+write.csv(cellcounts, file = paste0(home_dir, "/Manuscript and Figures/New Data/mouse_cellcounts_ortholog_gse208683.csv"))
+```
+
+
+# Check Cell Cycle after clustering
+
+```{r}
+# S phase genes
+mmus_s <- gorth(cc.genes.updated.2019$s.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+# G2M phase genes
+mmus_g2m <- gorth(cc.genes.updated.2019$g2m.genes, source_organism = "hsapiens", target_organism = "mmusculus")$ortholog_name
+
+# Normalizes data and calculates cell-cycle scoring to be regressed
+for(i in names){ 
+    data_list[[i]] <- NormalizeData(data_list[[i]]) 
+    data_list[[i]] <- CellCycleScoring(data_list[[i]], s.features = mmus_s, g2m.features = mmus_g2m) 
+}
+```
+
+# SCTransform
+
+```{r}
+gc()
+#Applies SCTransform individually to each sample 
+data_list <- lapply(X = data_list, FUN = SCTransform,  method ="glmGamPoi", return.only.var.genes = FALSE, vars.to.regress = c("S.Score", "G2M.Score"))
+gc()
+```
+
+
+```{r}
+# Save data after SCTransform, computationally intensive
+#saveRDS(data_list, file = paste0(home_dir, "/AD_mouse_objects_ortholog/data_list_ortholog_gse208683.RData"))
+#data_list <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/data_list_ortholog.RData"))
+```
+
+
+
+```{r}
+# Calculates variable features across samples for integration
+variable.features <- SelectIntegrationFeatures(object.list = data_list, nfeatures = 3000)
+```
+
+# Batch Correction
+
+```{r}
+# Merges samples
+data_list <- merge(x = data_list[[1]], y = data_list[2:length(data_list)], merge.data=TRUE) 
+
+# Assigns variable features calculated across samples
+VariableFeatures(data_list) <- variable.features 
+gc()
+```
+
+
+```{r}
+# Performs PCA
+data_list <- RunPCA(data_list, verbose = FALSE) 
+```
+
+```{r}
+variance <- (data_list@reductions$pca@stdev)^2
+variance <- variance / sum(variance)
+variance
+```
+
+
+
+```{r}
+# PC Plot before integration occurs
+options(repr.plot.height = 12, repr.plot.width = 20) 
+p1 <- DimPlot(object = data_list, reduction = "pca", pt.size = 2, group.by = "SampleID", raster = TRUE) 
+#p2 <- VlnPlot(object = data_list, features = "PC_1", group.by = "orig.ident", pt.size = 0) 
+#plot_grid(p1,p2)
+ggsave(filename= paste0(home_dir, "/Manuscript Figures/New Data/gse208683_pre_batch.pdf"),
+       plot = p1, device = cairo_pdf, width = 6, height = 5, units = "in") # name the file as an EPS
+```
+
+We should batch correct.
+
+```{r}
+# Running Harmony  
+options(repr.plot.height = 8, repr.plot.width = 16) 
+
+data_list <- RunHarmony(data_list, assay.use = "SCT", group.by.vars = "SampleID", plot_convergence = TRUE) 
+ggsave(paste0(home_dir, "/Manuscript and Figures/New Data/convergenece_plot_gse208683.pdf"))
+```
+
+```{r}
+variance <- (data_list@reductions$harmony@stdev)^2
+variance <- variance / sum(variance)
+variance
+```
+
+
+```{r}
+# PC plot after integration occurs
+p1 <- DimPlot(object = data_list, reduction = "harmony", pt.size = 2, group.by = "SampleID", raster = TRUE) 
+
+#p2 <- VlnPlot(object = data_list, features = "harmony_1", group.by = "orig.ident", pt.size = 0) 
+ggsave(filename= paste0(home_dir, "/Manuscript Figures/New Data/gse208683_post_batch.pdf"),
+       plot = p1, device = cairo_pdf, width = 6, height = 5, units = "in") # name the file as an EPS
+```
+
+
+
+```{r}
+# Elbowplot to select PCs for clustering
+ElbowPlot(data_list, reduction = "harmony", n = 50) 
+```
+
+Start with 30 PCS, check separation
+
+
+# Reducing Dimensionality and Clustering
+
+```{r}
+#Performing Dimensional Reduction 
+
+# UMAP
+data_list <- RunUMAP(data_list, reduction = "harmony", dims = 1:30, verbose = FALSE) 
+
+# Find Neighboring cells 
+data_list <- FindNeighbors(data_list, reduction = "harmony", dims = 1:30, verbose = FALSE) 
+
+# knn clustering
+data_list <- FindClusters(data_list, resolution = 1, verbose = FALSE) 
+```
+
+
+
+```{r}
+# Visualize data
+dittoDimPlot(data_list, "seurat_clusters", do.label = TRUE, legend.show = FALSE, labels.size = 3) 
+dittoDimPlot(data_list, "percent.mt") 
+
+```
+
+```{r}
+# Save dataset after clustering
+#saveRDS(data_list, file = paste0(home_dir, "/AD_mouse_objects_ortholog/gse208683_final.RData"))
+data_list <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/gse208683_final.RData"))
+```
+
+
+
+
+# Visualizing Data
+
+
+```{r}
+# Visualization of some markers
+marker_list <- c("Mrc1", "Trem2", "Igfbp7", "Col1a1", "Aldh1l1", "Hes5", "Pdgfra", "Matn4",
+                 "Mog", "Mobp", "Mbp", "Satb2", "Reln")
+Idents(data_list) <- data_list@meta.data$seurat_clusters
+#for(i in marker_list){
+  #p1 <- dittoDimPlot(data_list, var = i, assay = "RNA")
+  #ggsave(filename = paste0(home_dir, "/figures/gse208683/markers/umap_", i, ".png"),
+        # plot = p1, width = 9, height = 7)
+#}
+
+# Dot plot of all markers across clusters
+p2 <- DotPlot(data_list, features = marker_list, assay = "RNA") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_discrete(limits = rev)
+ggsave(filename = paste0(home_dir, "/figures/gse208683/markers/dotplot_markers.png"),
+       plot = p2, width = 9, height = 7)
+p2
+```
+
+# Finding Cluster Identifiers
+
+```{r}
+# Get unique identifiers
+unique_idents <- as.character(unique(data_list@meta.data$seurat_clusters))
+unique_idents
+
+# Initialize an empty list to store the results
+markers_list <- list()
+
+# Loop over each identifier and run FindMarkers
+for (id in unique_idents) {
+  markers_list[[id]] <- FindMarkers(
+    object = data_list,
+    ident.1 = id,
+    only.pos = TRUE,
+    assay = "RNA",
+    max.cells.per.ident = 300
+  )
+}
+
+saveRDS(markers_list, paste0(home_dir, "/all_cell_markers_mouse_ortholog_gse208683.RData"))
+
+```
+
+```{r}
+markers_list <- readRDS(paste0(home_dir, "/all_cell_markers_mouse_ortholog_gse208683.RData"))
+# Get counts per cluster from the Seurat object
+cluster_counts <- table(data_list$seurat_clusters)
+
+# Rename each list element: "clusternumber_clustercount"
+for (cl in names(markers_list)) {
+  names(markers_list)[names(markers_list) == cl] <- paste0(cl, "_n", cluster_counts[[cl]])
+}
+```
+
+
+
+```{r}
+write.xlsx(markers_list, file = paste0(home_dir, "/all_cell_markers_mouse_ortholog_gse208683.xlsx"), rowNames = TRUE)
+```
+
+0- Oligodendrocyte
+1- Neuron
+2- Neuron
+3- Astrocyte
+4- Neuron
+5- Neuron
+6- Neuron
+7- Neuron
+8- Neuron
+9- Neuron
+10- Neuron
+11- Microglia
+12- OPC
+13- Neuron
+14- Neuron
+15- Endothelial
+16- Astrocyte
+17- Neuron
+18- Neuron
+19- Doublet
+20- Neuron
+21- Neuron
+22- Neuron
+23- Neuron
+24- Neuron
+25- Astrocyte
+26- Neuron
+27- Neuron
+28- Neuron
+29- Endothelial
+30- Microglia
+31- Doublet
+32- Doublet
+33- OPC
+
+
+
+# Assign Idents
+
+```{r}
+data_list <- subset(data_list, subset = SCT_snn_res.1 %in% c(19, 31, 32), invert = TRUE)
+# Summary Idents
+Idents(data_list) <- data_list@meta.data$seurat_clusters
+new.cluster.ids <- c(
+  "Oligodendrocyte",           # 0
+  "Neuron",                    # 1
+  "Neuron",                    # 2
+  "Astrocyte",                 # 3
+  "Neuron",                    # 4
+  "Neuron",                    # 5
+  "Neuron",                    # 6
+  "Neuron",                    # 7
+  "Neuron",                    # 8
+  "Neuron",                    # 9
+  "Neuron",                    # 10
+  "Microglia",                 # 11
+  "Oligodendrocyte Precursor", # 12
+  "Neuron",                    # 13
+  "Neuron",                    # 14
+  "Endothelial",               # 15
+  "Astrocyte",                 # 16
+  "Neuron",                    # 17
+  "Neuron",                    # 18
+  "Neuron",                    # 20
+  "Neuron",                    # 21
+  "Neuron",                    # 22
+  "Neuron",                    # 23
+  "Neuron",                    # 24
+  "Astrocyte",                 # 25
+  "Neuron",                    # 26
+  "Neuron",                    # 27
+  "Neuron",                    # 28
+  "Endothelial",               # 29
+  "Microglia",                 # 30
+  "Oligodendrocyte Precursor"  # 33
+)
+names(new.cluster.ids) <- levels(data_list)
+data_list <- RenameIdents(data_list, new.cluster.ids)
+data_list@meta.data$summary <- Idents(data_list)
+```
+
+```{r}
+# Detailed Idents
+Idents(data_list) <- data_list@meta.data$seurat_clusters
+new.cluster.ids <- c(
+  "Oligodendrocyte_0", "Neuron_1", "Neuron_2", "Astrocyte_3", "Neuron_4",
+  "Neuron_5", "Neuron_6", "Neuron_7", "Neuron_8", "Neuron_9",
+  "Neuron_10", "Microglia_11", "OPC_12", "Neuron_13", "Neuron_14",
+  "Endothelial_15", "Astrocyte_16", "Neuron_17", "Neuron_18", "Neuron_20",
+  "Neuron_21", "Neuron_22", "Neuron_23", "Neuron_24", "Astrocyte_25",
+  "Neuron_26", "Neuron_27", "Neuron_28", "Endothelial_29", "Microglia_30",
+  "OPC_33"
+)
+names(new.cluster.ids) <- levels(data_list)
+data_list <- RenameIdents(data_list, new.cluster.ids)
+data_list@meta.data$detail <- Idents(data_list)
+```
+
+
+
+Source used for cell type assignment
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6329831/
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6671143/ 
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6655561/
+
+
+```{r}
+# Save seurat object with cell types identified
+#saveRDS(data_list, file = paste0(home_dir, "/AD_mouse_objects_ortholog/gse208683_final_filtered.RData"))
+data_list <- readRDS(file = paste0(home_dir, "/AD_mouse_objects_ortholog/gse208683_final_filtered.RData"))
+```
+
+```{r}
+table(data_list@meta.data$orig.ident, data_list@meta.data$SampleID)
+```
+
+
+```{r}
+table(data_list@meta.data$seurat_clusters, data_list@meta.data$summary)
+table(data_list@meta.data$seurat_clusters, data_list@meta.data$Genotype)
+
+```
+
+11 and 30
+
+```{r}
+data_list <- subset(data_list, subset = summary == "Microglia")
+saveRDS(data_list, file = paste0(home_dir, "/AD_mouse_objects_ortholog/gse208683_microglia_pre.RData"))
+```
+
+
+```{r}
+table(data_list@meta.data$orig.ident, data_list@meta.data$Genotype)
+```
+
+
+# Visualizations for Manuscript
+
+## UMAP
+
+```{r}
+data_list@meta.data$summary <- if_else(data_list@meta.data$summary == "Oligodendrocyte Precursor", "OPC", data_list@meta.data$summary)
+```
+
+
+
+```{r}
+# UMAP of Human cells
+Idents(data_list) <- data_list@meta.data$summary
+levels(data_list) <- c("Astrocyte", "Endothelial", "Microglia", 
+                      "Neuron", "Oligodendrocyte", "OPC")
+p1 <- dittoDimPlot(data_list, Idents(data_list)) +
+  theme(
+    axis.title = element_text(size = 16),   # both x and y axis titles
+    axis.text  = element_text(size = 14),   # both x and y tick labels
+    axis.ticks.length = unit(0.25, "cm")    # physical tick mark length
+  )
+ggsave(filename = paste0(home_dir, "/figures/manuscript/GSE208683_umap.pdf"),
+       plot = p1, device = cairo_pdf, width = 9, height = 7, units = "in")
+p1
+```
+
+## DotPlot
+
+```{r}
+levels(data_list) <- c("Microglia", "Endothelial", "Astrocyte", 
+                      "OPC", "Oligodendrocyte", "Neuron")
+
+markers <- c("Mrc1", "Trem2", "Igfbp7", "Aldh1l1", "Hes5", "Pdgfra", "Matn4",
+                 "Mog", "Mobp", "Mbp", "Satb2", "Reln")
+
+# Dotplot of common human markers
+p2 <- DotPlot(data_list, features = markers, assay = "RNA") + 
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1, size = 14),
+    axis.text.y  = element_text(size = 14),
+    axis.title   = element_text(size = 16),
+    legend.text  = element_text(size = 12),
+    legend.title = element_text(size = 14)
+  ) + 
+  scale_y_discrete(limits = rev)
+ggsave(filename = paste0(home_dir, "/figures/manuscript/GSE208683_dotplot.pdf"),
+       plot = p2, device = cairo_pdf, width = 9, height = 7, units = "in")
+p2
+
+```
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
