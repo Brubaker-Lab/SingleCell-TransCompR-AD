@@ -1,0 +1,76 @@
+---
+title: "Microglia GSEA"
+output: gsea_plot_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+
+fgsea_pca_results_hallmark_pc2 <- read.csv(".../fgsea_pca_results_hallmark_pc2.csv")
+fgsea_pc <- fgsea_pca_results_hallmark_pc2
+sig_pc <- fgsea_pc[fgsea_pc[,3] < 0.05,]
+library(dplyr)
+ascend_NESpc <- arrange(sig_pc, NES)
+path_pc <- ascend_NESpc$pathway
+
+library(ggplot2)
+
+svg("pc2_microglia_merged_gsea.svg", width=6, height=5)
+ggplot(sig_pc) +
+  geom_col(aes(x = NES, y = pathway, fill = NES > 0), colour = "black", width = 0.8) + 
+  ylab(NULL) + xlab("NES") + theme_classic() +
+  theme(legend.position = "none", text=element_text(color="black", size = 10), 
+        axis.text = element_text(color = "black", size=10)) + theme(panel.grid = element_blank()) +
+  xlim(c(-3,3)) + scale_y_discrete(limits = path_pc) + scale_fill_manual(values = c("red2", "royalblue3"))
+dev.off()
+
+
+fgsea_pca_results_hallmark_pc5 <- read.csv(".../fgsea_pca_results_hallmark_pc5.csv")
+fgsea_pc <- fgsea_pca_results_hallmark_pc5
+sig_pc <- fgsea_pc[fgsea_pc[,3] < 0.05,]
+library(dplyr)
+ascend_NESpc <- arrange(sig_pc, NES)
+path_pc <- ascend_NESpc$pathway
+
+library(ggplot2)
+
+svg("pc5_microglia_merged_gsea.svg", width=6, height=5)
+ggplot(sig_pc) +
+  geom_col(aes(x = NES, y = pathway, fill = NES > 0), colour = "black", width = 0.8) + 
+  ylab(NULL) + xlab("NES") + theme_classic() +
+  theme(legend.position = "none", text=element_text(color="black", size = 10), 
+        axis.text = element_text(color = "black", size=10)) + theme(panel.grid = element_blank()) +
+  xlim(c(-3,3)) + scale_y_discrete(limits = path_pc) + scale_fill_manual(values = c("red2", "royalblue3"))
+dev.off()
+
+```
+```{r}
+
+fgsea_spca_results_hallmark_merged_500_spc2 <- read.csv(".../fgsea_spca_results_hallmark_merged_500_spc2.csv")
+fgsea_pc <- fgsea_spca_results_hallmark_merged_500_spc2
+sig_pc <- fgsea_pc[fgsea_pc[,3] < 0.2,]
+library(dplyr)
+ascend_NESpc <- arrange(sig_pc, NES)
+path_pc <- ascend_NESpc$pathway
+
+library(ggplot2)
+
+svg("spc2_microglia_merged_gsea.svg", width=6, height=5)
+ggplot(sig_pc) +
+  geom_col(aes(x = NES, y = pathway, fill = NES > 0), colour = "black", width = 0.8) + 
+  ylab(NULL) + xlab("NES") + theme_classic() +
+  theme(legend.position = "none", text=element_text(color="black", size = 10), 
+        axis.text = element_text(color = "black", size=10)) + theme(panel.grid = element_blank()) +
+  xlim(c(-3,3)) + scale_y_discrete(limits = path_pc) + scale_fill_manual(values = c("red2", "royalblue3"))
+dev.off()
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
